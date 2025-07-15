@@ -1,0 +1,11 @@
+torch>=2.1
+torchvision
+timm
+einops
+rasterio
+numpy
+scikit-learn
+matplotlib
+tqdm
+pandas
+pyyaml
