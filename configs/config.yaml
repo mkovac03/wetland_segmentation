@@ -31,7 +31,7 @@ loss:
     gamma: 1.0
     boundary_weight: 0.2
   tversky:
-    alpha: 0.5
+    alpha: 0.3
     beta: 0.7
 
 gradient_clipping: 1.0

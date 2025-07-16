@@ -15,6 +15,11 @@ from models.resunet_vit import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
 from losses.focal_tversky import CombinedFocalTverskyLoss
 
+import torchvision.utils as vutils
+import matplotlib.pyplot as plt
+import io
+from PIL import Image
+
 import argparse
 import yaml
 
@@ -120,6 +125,53 @@ for epoch in range(config["training"]["epochs"]):
     writer.add_scalar("F1/val", f1, epoch)
 
     scheduler.step(f1)
+    current_lr = optimizer.param_groups[0]["lr"]
+    writer.add_scalar("LearningRate", current_lr, epoch)
+
+
+    def create_image_grid(gt_tensor, pred_tensor, epoch, max_samples=5, num_classes=20):
+        fig, axes = plt.subplots(max_samples, 2, figsize=(6, 2 * max_samples))
+        cmap = plt.get_cmap("tab20", num_classes)
+        for i in range(max_samples):
+            gt_img = gt_tensor[i].squeeze().numpy()
+            pred_img = pred_tensor[i].squeeze().numpy()
+            axes[i, 0].imshow(gt_img, cmap=cmap, vmin=0, vmax=num_classes - 1)
+            axes[i, 0].set_title("Ground Truth")
+            axes[i, 0].axis("off")
+            axes[i, 1].imshow(pred_img, cmap=cmap, vmin=0, vmax=num_classes - 1)
+            axes[i, 1].set_title("Prediction")
+            axes[i, 1].axis("off")
+        fig.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        plt.close(fig)
+        buf.seek(0)
+        image = Image.open(buf)
+        return image
+
+
+    # --- Log visualization every 5 epochs ---
+    if epoch % 5 == 0:
+        n_samples = min(5, len(val_loader))
+        val_iter = iter(val_loader)
+        imgs, lbls, preds = [], [], []
+        with torch.no_grad():
+            for _ in range(n_samples):
+                try:
+                    x, y = next(val_iter)
+                    x, y = x.cuda(), y.cuda()
+                    out = model(x)
+                    pred = out.argmax(1)
+                    lbls.append(y.cpu())
+                    preds.append(pred.cpu())
+                except StopIteration:
+                    break
+        if preds:
+            lbls_tensor = torch.cat(lbls)
+            preds_tensor = torch.cat(preds)
+            img = create_image_grid(lbls_tensor, preds_tensor, epoch, max_samples=n_samples,
+                                    num_classes=config["num_classes"])
+            writer.add_image("Samples/GT_vs_Pred", vutils.to_tensor(img), epoch)
 
     # Save best model and check early stopping
     if f1 > best_f1:
