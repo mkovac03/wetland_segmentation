@@ -18,6 +18,9 @@ from losses.focal_tversky import CombinedFocalTverskyLoss
 import argparse
 import yaml
 
+print(torch.cuda.get_device_name(0))
+print("CUDA available:", torch.cuda.is_available())
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="configs/config.yaml")
 args = parser.parse_args()
@@ -37,6 +40,7 @@ val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
 
 # Model, optimizer, loss
 model = ResNetUNetViT(n_classes=config["num_classes"], input_channels=config["input_channels"]).cuda()
+print("Device:", next(model.parameters()).device)
 optimizer = optim.AdamW(model.parameters(), lr=config["training"]["lr"], weight_decay=config["training"]["weight_decay"])
 
 criterion = CombinedFocalTverskyLoss(
