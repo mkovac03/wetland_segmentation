@@ -4,18 +4,16 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import json
 import torch
-import numpy as np
 from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast, GradScaler
 from torch import nn, optim
-import torch.nn.functional as F
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from scipy.ndimage import binary_dilation
 
 from data.dataset import GoogleEmbedDataset
 from models.resunet_vit import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
+from losses.focal_tversky import CombinedFocalTverskyLoss
 
 import argparse
 import yaml
@@ -37,60 +35,32 @@ val_ds = GoogleEmbedDataset(splits["val"])
 train_loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True, num_workers=4)
 val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
 
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=1.0, gamma=1.0, reduction='mean', ignore_index=255, boundary_weight=0.2):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-        self.ignore_index = ignore_index
-        self.boundary_weight = boundary_weight
-
-    def forward(self, inputs, targets):
-        # Compute raw loss
-        ce_loss = F.cross_entropy(
-            inputs, targets, reduction='none', ignore_index=self.ignore_index
-        )  # [B, H, W]
-        pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss  # [B, H, W]
-
-        # Create valid mask
-        valid_mask = (targets != self.ignore_index).float()
-
-        # Compute boundary mask
-        boundary_mask = self._compute_boundary_mask(targets)  # float32, [B, H, W], values in {0.0, 1.0}
-        weight_map = torch.where(boundary_mask.bool(), self.boundary_weight, 1.0).to(inputs.device)
-
-        # Apply weighting
-        focal_loss = focal_loss * valid_mask * weight_map
-
-        if self.reduction == 'mean':
-            return focal_loss.sum() / (valid_mask * weight_map).sum().clamp(min=1e-8)
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        else:
-            return focal_loss
-
-    def _compute_boundary_mask(self, targets):
-        # targets: [B, H, W], long
-        b, h, w = targets.shape
-        boundary = torch.zeros((b, h, w), dtype=torch.float32)
-
-        for i in range(b):
-            t = targets[i].detach().cpu().numpy()
-            t_mask = (t != self.ignore_index)
-            t_dilated = binary_dilation(t_mask, iterations=1)
-            edges = t_dilated & ~t_mask
-            boundary[i] = torch.from_numpy(edges.astype(np.float32))
-
-        return boundary
-
 # Model, optimizer, loss
 model = ResNetUNetViT(n_classes=config["num_classes"], input_channels=config["input_channels"]).cuda()
 optimizer = optim.AdamW(model.parameters(), lr=config["training"]["lr"], weight_decay=config["training"]["weight_decay"])
-criterion = FocalLoss(alpha=1.0, gamma=1.0, ignore_index=255, boundary_weight=0.2)
 
-scaler = GradScaler(enabled=config["training"]["use_amp"])
+criterion = CombinedFocalTverskyLoss(
+    num_classes=config["num_classes"],
+    focal_alpha=config.get("loss", {}).get("focal", {}).get("alpha", 1.0),
+    focal_gamma=config.get("loss", {}).get("focal", {}).get("gamma", 1.0),
+    boundary_weight=config.get("loss", {}).get("focal", {}).get("boundary_weight", 0.2),
+    tversky_alpha=config.get("loss", {}).get("tversky", {}).get("alpha", 0.5),
+    tversky_beta=config.get("loss", {}).get("tversky", {}).get("beta", 0.3),
+    ignore_index=255
+)
+
+scaler = GradScaler(enabled=config["training"].get("use_amp", False))
+
+# Scheduler and early stopping
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode="max",
+    factor=config.get("scheduler", {}).get("factor", 0.5),
+    patience=config.get("scheduler", {}).get("patience", 5),
+    verbose=True
+)
+patience = config["training"].get("early_stopping_patience", 10)
+epochs_no_improve = 0
 
 # Logging
 os.makedirs(config["output_dir"], exist_ok=True)
@@ -99,16 +69,21 @@ log_file = open(log_path, "a")
 writer = SummaryWriter(log_dir=config["output_dir"])
 
 # Training loop
+best_f1 = -1
 for epoch in range(config["training"]["epochs"]):
     model.train()
     total_loss = 0
     for x, y in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
         x, y = x.cuda(), y.cuda()
         optimizer.zero_grad()
-        with autocast(enabled=config["training"]["use_amp"]):
+        with autocast(enabled=config["training"].get("use_amp", False)):
             out = model(x)
             loss = criterion(out, y)
         scaler.scale(loss).backward()
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.get("gradient_clipping", 1.0))
+
         scaler.step(optimizer)
         scaler.update()
         total_loss += loss.item()
@@ -133,7 +108,6 @@ for epoch in range(config["training"]["epochs"]):
     miou = compute_miou(all_preds, all_labels, config["num_classes"])
     f1 = compute_f1(all_preds, all_labels, config["num_classes"])
 
-    # Logging
     log_file.write(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}, Acc: {acc:.4f}, mIoU: {miou:.4f}, F1: {f1:.4f}\n")
     log_file.flush()
     writer.add_scalar("Loss/train", avg_loss, epoch)
@@ -141,9 +115,19 @@ for epoch in range(config["training"]["epochs"]):
     writer.add_scalar("mIoU/val", miou, epoch)
     writer.add_scalar("F1/val", f1, epoch)
 
-    # Save checkpoint
-    ckpt_path = os.path.join(config["output_dir"], f"model_epoch{epoch+1}.pt")
-    torch.save(model.state_dict(), ckpt_path)
+    scheduler.step(f1)
+
+    # Save best model and check early stopping
+    if f1 > best_f1:
+        best_f1 = f1
+        epochs_no_improve = 0
+        ckpt_path = os.path.join(config["output_dir"], f"model_epoch{epoch+1}.pt")
+        torch.save(model.state_dict(), ckpt_path)
+    else:
+        epochs_no_improve += 1
+        if epochs_no_improve >= patience:
+            print(f"Early stopping triggered after {epoch+1} epochs.")
+            break
 
 log_file.close()
 writer.close()

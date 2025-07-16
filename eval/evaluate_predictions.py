@@ -8,9 +8,21 @@ import seaborn as sns
 from tqdm import tqdm
 import csv
 
-# Paths and parameters
+# ========== Dynamic path discovery ==========
+BASE_DIR = "/media/lkm413/storage1/wetland_segmentation/outputs/"
 INPUT_DIR = "/media/lkm413/storage1/gee_embedding_download/images/Denmark/2018/"
-PRED_DIR = "/media/lkm413/storage1/wetland_segmentation/outputs/predictions_Denmark2018/"
+
+pattern = os.path.join(BASE_DIR, "predictions_Denmark2018_*")
+pred_dirs = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+
+if not pred_dirs:
+    raise RuntimeError("No prediction output folders found matching pattern.")
+
+PRED_DIR = pred_dirs[0]
+timestamp = os.path.basename(PRED_DIR).split("_", maxsplit=2)[-1]
+print(f"[INFO] Using latest predictions from: {PRED_DIR}")
+
+# ========== Parameters ==========
 NUM_CLASSES = 20
 NODATA_VALUE = 255
 
@@ -54,10 +66,10 @@ def main():
     # Normalize confusion matrix by true label counts (row-wise)
     conf_mat_norm = conf_mat.astype(np.float32)
     row_sums = conf_mat_norm.sum(axis=1, keepdims=True)
-    # Avoid division by zero:
     conf_mat_norm = np.divide(conf_mat_norm, row_sums, where=row_sums != 0)
 
     # Plot normalized confusion matrix
+    cm_filename = f"confusion_matrix_normalized_{timestamp}.png"
     plt.figure(figsize=(12, 10))
     sns.heatmap(conf_mat_norm, annot=True, fmt=".2f", cmap="Blues",
                 xticklabels=[str(i) for i in range(NUM_CLASSES)],
@@ -66,12 +78,12 @@ def main():
     plt.ylabel("True Label")
     plt.title("Normalized Confusion Matrix (Recall per class)")
     plt.tight_layout()
-    plt.savefig("confusion_matrix_normalized.png")
+    plt.savefig(cm_filename)
     plt.close()
-    print("Normalized confusion matrix saved as confusion_matrix_normalized.png")
+    print(f"Normalized confusion matrix saved as {cm_filename}")
 
     # Save metrics to CSV
-    csv_filename = "metrics_summary.csv"
+    csv_filename = f"metrics_summary_{timestamp}.csv"
     with open(csv_filename, mode='w', newline='') as csv_file:
         writer = csv.writer(csv_file)
         writer.writerow(["Class", "Precision", "Recall", "F1-Score", "Support"])

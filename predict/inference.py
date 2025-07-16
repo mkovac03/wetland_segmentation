@@ -7,27 +7,47 @@ import numpy as np
 from tqdm import tqdm
 import rasterio
 from datetime import datetime
+from glob import glob
 from rasterio.windows import Window
+import re
 from models.resunet_vit import ResNetUNetViT
+import yaml
 
-PATCH_SIZE = 512
-STRIDE = 512
-NUM_CLASSES = 20
-INPUT_CHANNELS = 29
+# Load config
+with open("configs/config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+
+PATCH_SIZE = config["patch_size"]
+STRIDE = config["stride"]
+NUM_CLASSES = config["num_classes"]
+INPUT_CHANNELS = config["input_channels"]
+BASE_DIR = config.get("base_dir", "/media/lkm413/storage1/wetland_segmentation")
+INPUT_DIR = config["input_dir"]
+
 
 # ========== Argument Parser ==========
 parser = argparse.ArgumentParser()
-parser.add_argument("--timestamp", help="Run timestamp (used to locate model and logs)")
+parser.add_argument("--timestamp", help="Run timestamp (e.g. 20250715_182612)")
 args = parser.parse_args()
 
-# ========== Paths and Timestamp ==========
-timestamp = args.timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+# ========== Resolve timestamp ==========
+if args.timestamp:
+    timestamp = args.timestamp
+else:
+    print("[INFO] No --timestamp provided. Searching for latest valid run...")
+    candidates = glob(os.path.join(BASE_DIR, "outputs", "20*_*"))
+    timestamps = sorted([
+        os.path.basename(p) for p in candidates
+        if os.path.isdir(p) and os.path.exists(os.path.join(p, "training_log.txt"))
+    ])
+    if not timestamps:
+        raise FileNotFoundError("No timestamped run folder with training_log.txt found in outputs/")
+    timestamp = timestamps[-1]
+    print(f"[INFO] Using latest run: {timestamp}")
 
-BASE_DIR = "/media/lkm413/storage1/wetland_segmentation"
-LOG_PATH = f"{BASE_DIR}/outputs/{timestamp}/training_log.txt"
-CKPT_DIR = f"{BASE_DIR}/outputs/{timestamp}/"
-OUTPUT_DIR = f"{BASE_DIR}/outputs/predictions_Denmark2018_{timestamp}/"
-INPUT_DIR = "/media/lkm413/storage1/gee_embedding_download/images/Denmark/2018/"
+LOG_PATH = os.path.join(BASE_DIR, "outputs", timestamp, "training_log.txt")
+CKPT_DIR = os.path.join(BASE_DIR, "outputs", timestamp)
+OUTPUT_DIR = os.path.join(BASE_DIR, f"outputs/predictions_Denmark2018_{timestamp}")
 
 # ========== Load Label Remap ==========
 with open("data/label_remap.json", "r") as f:
@@ -65,7 +85,7 @@ def run_inference(model, input_tif, output_tif):
             for y in range(0, src.height, STRIDE):
                 for x in range(0, src.width, STRIDE):
                     window = Window(x, y, PATCH_SIZE, PATCH_SIZE)
-                    img = src.read(list(range(2, 31)), window=window).astype(np.float32)
+                    img = src.read(list(range(2, 2 + INPUT_CHANNELS)), window=window).astype(np.float32)
 
                     if img.shape[1] < PATCH_SIZE or img.shape[2] < PATCH_SIZE:
                         continue
@@ -87,17 +107,18 @@ if __name__ == "__main__":
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint {ckpt_path} not found.")
 
-    print(f"Loading best model from epoch {best_epoch} with F1 score {best_f1:.4f}")
+    print(f"[INFO] Loading best model from epoch {best_epoch} with F1 score {best_f1:.4f}")
     model = load_model(ckpt_path)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    input_files = glob.glob(os.path.join(INPUT_DIR, "*.tif"))
-    print(f"Found {len(input_files)} input images in {INPUT_DIR}")
+    input_files = glob(os.path.join(INPUT_DIR, "*.tif"))
+    print(f"[INFO] Found {len(input_files)} input images in {INPUT_DIR}")
+    print(f"[INFO] Saving predictions to {OUTPUT_DIR}")
 
     for input_path in tqdm(input_files, desc="Running inference", unit="tile"):
         filename = os.path.basename(input_path)
         output_path = os.path.join(OUTPUT_DIR, filename)
         run_inference(model, input_path, output_path)
 
-    print(f"Inference complete. Predictions saved to: {OUTPUT_DIR}")
+    print("[INFO] Inference complete.")
