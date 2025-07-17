@@ -4,7 +4,7 @@ This project performs high-resolution semantic segmentation of wetlands across E
 
 ---
 
-![Model Overview](ResUNetViT.png)
+![Model Overview](architecture.png)
 
 <div style="display: flex; align-items: flex-start; gap: 20px;">
   <div style="flex: 1;">
