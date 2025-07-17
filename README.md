@@ -46,7 +46,7 @@ This project performs high-resolution semantic segmentation of wetlands across E
   * Global 64-band spectral-temporal embedding trained via contrastive learning
   * Derived from Sentinel-1, Sentinel-2, and Landsat time series
 * **Resolution**: 10 m
-* **Coverage**: Europe-wide
+* **Coverage**: Global
 * **Selected Features**:
 
   * 29 pre-selected image channels
