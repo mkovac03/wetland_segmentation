@@ -106,7 +106,7 @@ for f in tqdm(files):
         background_label = remap_dict.get(0, None)
         if background_label is not None:
             background_ratio = np.sum(label == background_label) / label.size
-            if background_ratio > 0.70:
+            if background_ratio > 0.95:
                 # print(f"Skipping {out_path}: {background_ratio * 100:.1f}% background")
                 continue
 

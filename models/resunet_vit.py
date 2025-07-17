@@ -59,10 +59,9 @@ class ResNetUNetViT(nn.Module):
         self.final = nn.Conv2d(32, n_classes, kernel_size=1)
 
     def _decoder_block(self, in_channels, out_channels):
-        # simple ConvTranspose2d upsample + nonlinearity
         return nn.Sequential(
-            nn.ConvTranspose2d(in_channels, out_channels,
-                               kernel_size=2, stride=2),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.ReLU(inplace=True)
         )
 

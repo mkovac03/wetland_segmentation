@@ -1,12 +1,25 @@
+# File: data/dataset.py
+
 import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from torchvision import transforms
+from data.transform import basic_augmentation  # make sure this is defined
 
 class GoogleEmbedDataset(Dataset):
+    """
+    Dataset for loading Google Satellite Embedding .npy files.
+
+    Each sample consists of a multiband input image tensor and a single-channel label map.
+    """
     def __init__(self, file_list, transform=None, check_files=True):
-        self.transform = transform
+        """
+        Args:
+            file_list (List[str]): Base paths (excluding _img.npy/_lbl.npy) to samples
+            transform (callable): Optional transform applied to input image (not labels)
+            check_files (bool): If True, skip any base without both _img.npy and _lbl.npy
+        """
+        self.transform = transform or basic_augmentation()
         self.file_list = []
 
         for base in file_list:
@@ -14,12 +27,12 @@ class GoogleEmbedDataset(Dataset):
             lbl_path = base + '_lbl.npy'
 
             if check_files and (not os.path.exists(img_path) or not os.path.exists(lbl_path)):
-                continue  # skip missing files
+                continue
 
             self.file_list.append(base)
 
-        if len(self.file_list) == 0:
-            raise RuntimeError("GoogleEmbedDataset: no valid .npy file pairs found!")
+        if not self.file_list:
+            raise RuntimeError("GoogleEmbedDataset: No valid .npy file pairs found.")
 
     def __len__(self):
         return len(self.file_list)
@@ -36,13 +49,21 @@ class GoogleEmbedDataset(Dataset):
         lbl = torch.from_numpy(lbl).long()
 
         if self.transform:
-            img = self.transform(img)
+            img, lbl = self.transform(img, lbl)
 
         return img, lbl
 
 
 def get_file_list(processed_dir):
-    """Return sorted list of base filenames (without _img/_lbl suffix)"""
+    """
+    List all valid image/label base filenames from a processed directory.
+
+    Args:
+        processed_dir (str): Directory containing *_img.npy and *_lbl.npy pairs
+
+    Returns:
+        List[str]: Base paths for all valid image/label pairs
+    """
     files = [
         os.path.join(processed_dir, f[:-8])
         for f in os.listdir(processed_dir)
