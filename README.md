@@ -80,6 +80,8 @@ This project performs high-resolution semantic segmentation of wetlands across E
 
 ---
 
+![Example Prediction](examples.png)
+
 ## 🚀 Quick Start
 
 1. **Clone the repo**
@@ -117,7 +119,7 @@ The model is a **ResNet-UNet-ViT hybrid** that fuses convolutional and attention
 
 * **Encoder**:
 
-  * Based on ResNet-34
+  * Based on ResNet-34 (optional ImageNet pretraining)
   * Modified first convolution to accept 29-band embeddings (e.g., temporal and spectral Earth Engine bands)
   * Sequential feature extraction through residual blocks and max pooling
 
