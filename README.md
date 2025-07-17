@@ -19,7 +19,8 @@ This project performs high-resolution semantic segmentation of wetlands using a 
 │   ├── train.py                 # Main training script
 │   ├── metrics.py               # Computes mIoU, F1, etc.
 │   └── losses/
-│       └── focal_tversky.py     # Custom Focal + Tversky loss with boundary masking
+│       ├── focal_tversky.py     # Custom Focal + Tversky loss with boundary masking
+│       └── soft_boundary_dice.py# Optional soft boundary-aware Dice loss
 ├── predict/
 │   ├── inference.py             # Patch-based inference with VRT support
 │   └── evaluate_predictions.py  # Confusion matrix, metrics CSV
@@ -72,18 +73,20 @@ python -m predict.inference --timestamp <TIMESTAMP>
 
     * Models long-range spatial dependencies across the entire patch,
     * Aggregates contextual information to assist in distinguishing subtle wetland types,
-    * Operates at a reduced spatial resolution (e.g., 16x16 patches) for efficiency.
-  * **Decoder**: A UNet-style upsampling path, where feature maps are:
+    * Operates at a reduced spatial resolution (e.g., 16x16 patches) for efficiency,
+    * Parameters such as `vit_embed_dim`, `vit_depth`, `vit_heads`, `vit_patch_size`, and `vit_img_size` are configurable via `config.yaml`.
 
-    * Upsampled via transposed convolutions or interpolation,
-    * Merged with encoder skip connections (residual links),
-    * Refined to predict per-pixel class logits at the original 512×512 patch scale.
+  * **Decoder**: A UNet-style upsampling path:
+
+    * Uses `F.interpolate` for upsampling (rather than transposed convs) for smoother outputs with fewer artifacts,
+    * Includes skip connections with encoder layers,
+    * Adds optional dropout for regularization.
 
   This design allows the model to **combine texture- and boundary-level cues (via CNN)** with **global spatial patterns (via ViT)**—ideal for mapping heterogeneous and often ambiguous wetland landscapes.
 
 ---
 
-## 🔨 Loss Function
+## 🛠️ Loss Function
 
 * **Focal Loss** with:
 
@@ -95,11 +98,11 @@ python -m predict.inference --timestamp <TIMESTAMP>
   * Generalized Dice-like formulation to handle extreme class imbalance
   * High recall sensitivity useful for detecting small/missing wetlands
 
-* **Combined Loss** = Focal + Tversky, defined in `losses/focal_tversky.py`
+* **Combined Loss** = Focal + Tversky (+ optional boundary-aware Dice)
 
 ---
 
-## 📈 Evaluation
+## 📊 Evaluation
 
 * **Metrics**:
 
@@ -127,7 +130,4 @@ For questions or collaboration:
 
 * 🧑‍💻 [Gyula Máté Kovács](https://github.com/mkovac03)
 * 🌍 University of Copenhagen · Global Wetland Center
-# wetland_segmentation
-# wetland_segmentation
-# wetland_segmentation
 # wetland_segmentation
