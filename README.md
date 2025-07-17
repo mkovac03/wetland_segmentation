@@ -38,11 +38,6 @@ This project performs high-resolution semantic segmentation of wetlands across E
   * Intertidal flats
   * Surface water
 
-  </div>
-  <img src="examples.png" alt="Examples" style="max-width: 50%; height: auto; border:1px solid #ccc;">
-
-</div>
-
 ### 🛋️ Input Features
 
 * **Source**: [Google Earth Engine – Satellite Embedding v1](https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL)
