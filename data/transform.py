@@ -12,11 +12,19 @@ class RandomFlipRotate:
         if random.random() < self.p:
             img = TF.hflip(img)
             lbl = TF.hflip(lbl)
+
         if random.random() < self.p:
             img = TF.vflip(img)
             lbl = TF.vflip(lbl)
+
         if random.random() < self.p:
             angle = random.choice([90, 180, 270])
             img = TF.rotate(img, angle)
-            lbl = TF.rotate(lbl, angle)
+
+            # Convert lbl to fake "channel" format before rotation
+            lbl = lbl.unsqueeze(0).float()
+            lbl = TF.rotate(lbl, angle, interpolation=TF.InterpolationMode.NEAREST)
+            lbl = lbl.squeeze(0).long()
+
         return img, lbl
+

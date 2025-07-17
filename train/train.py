@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_tensor
 
 from data.dataset import GoogleEmbedDataset
-from data.transforms import RandomFlipRotate
+from data.transform import RandomFlipRotate
 from models.resunet_vit import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
 from losses.focal_tversky import CombinedFocalTverskyLoss

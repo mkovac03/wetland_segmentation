@@ -4,7 +4,8 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from data.transform import basic_augmentation  # make sure this is defined
+from data.transform import RandomFlipRotate
+
 
 class GoogleEmbedDataset(Dataset):
     """
@@ -19,7 +20,7 @@ class GoogleEmbedDataset(Dataset):
             transform (callable): Optional transform applied to input image (not labels)
             check_files (bool): If True, skip any base without both _img.npy and _lbl.npy
         """
-        self.transform = transform or basic_augmentation()
+        self.transform = transform or RandomFlipRotate()
         self.file_list = []
 
         for base in file_list:
