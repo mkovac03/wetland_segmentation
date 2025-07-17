@@ -48,6 +48,7 @@ This project performs high-resolution semantic segmentation of wetlands across E
   * 29 pre-selected image channels
   * Selected based on mean feature importance across experiments
 
+![Examples](examples.png)
 ---
 
 ## 📦 Project Structure
