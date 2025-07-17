@@ -117,7 +117,7 @@ The model is a **ResNet-UNet-ViT hybrid** that fuses convolutional and attention
 
 * **Encoder**:
 
-  * Based on ResNet-34 (optional ImageNet pretraining)
+  * Based on ResNet-34
   * Modified first convolution to accept 29-band embeddings (e.g., temporal and spectral Earth Engine bands)
   * Sequential feature extraction through residual blocks and max pooling
 
