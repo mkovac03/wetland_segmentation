@@ -4,16 +4,14 @@ import json
 import torch
 import argparse
 import numpy as np
-from tqdm import tqdm
 import rasterio
-from datetime import datetime
-from glob import glob
+from tqdm import tqdm
 from rasterio.windows import Window
-import re
 from models.resunet_vit import ResNetUNetViT
 import yaml
+import re
 
-# Load config
+# ========== Load config ==========
 with open("configs/config.yaml", "r") as f:
     config = yaml.safe_load(f)
 
@@ -23,7 +21,6 @@ NUM_CLASSES = config["num_classes"]
 INPUT_CHANNELS = config["input_channels"]
 BASE_DIR = config.get("base_dir", "/media/lkm413/storage1/wetland_segmentation")
 INPUT_DIR = config["input_dir"]
-
 
 # ========== Argument Parser ==========
 parser = argparse.ArgumentParser()
@@ -35,7 +32,7 @@ if args.timestamp:
     timestamp = args.timestamp
 else:
     print("[INFO] No --timestamp provided. Searching for latest valid run...")
-    candidates = glob(os.path.join(BASE_DIR, "outputs", "20*_*"))
+    candidates = glob.glob(os.path.join(BASE_DIR, "outputs", "20*_*"))
     timestamps = sorted([
         os.path.basename(p) for p in candidates
         if os.path.isdir(p) and os.path.exists(os.path.join(p, "training_log.txt"))
@@ -105,14 +102,29 @@ if __name__ == "__main__":
 
     ckpt_path = os.path.join(CKPT_DIR, f"model_epoch{best_epoch}.pt")
     if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"Checkpoint {ckpt_path} not found.")
+        print(f"[WARNING] model_epoch{best_epoch}.pt not found. Trying best_model.pt...")
+        best_path = os.path.join(CKPT_DIR, "best_model.pt")
+        if os.path.exists(best_path):
+            ckpt_path = best_path
+        else:
+            ckpt_files = glob.glob(os.path.join(CKPT_DIR, "model_epoch*.pt"))
+            if ckpt_files:
+                available_epochs = sorted([
+                    int(re.search(r'model_epoch(\d+)\.pt', os.path.basename(f)).group(1))
+                    for f in ckpt_files
+                ])
+                fallback_epoch = available_epochs[-1]
+                ckpt_path = os.path.join(CKPT_DIR, f"model_epoch{fallback_epoch}.pt")
+                print(f"[WARNING] Fallback: using model_epoch{fallback_epoch}.pt")
+            else:
+                raise FileNotFoundError(f"No model checkpoints available in {CKPT_DIR}")
 
     print(f"[INFO] Loading best model from epoch {best_epoch} with F1 score {best_f1:.4f}")
     model = load_model(ckpt_path)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    input_files = glob(os.path.join(INPUT_DIR, "*.tif"))
+    input_files = glob.glob(os.path.join(INPUT_DIR, "*.tif"))
     print(f"[INFO] Found {len(input_files)} input images in {INPUT_DIR}")
     print(f"[INFO] Saving predictions to {OUTPUT_DIR}")
 

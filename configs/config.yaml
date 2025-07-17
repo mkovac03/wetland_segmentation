@@ -1,6 +1,6 @@
 # File: configs/config.yaml
 
-input_dir: "/media/lkm413/storage1/gee_embedding_download/images/Denmark/2018/"
+input_dir: "/media/lkm413/storage1/gee_embedding_download/images/Denmark/2018/29b/"
 processed_dir: "data/processed/{now}"
 splits_path: "data/splits/splits_{now}.json"
 output_dir: "outputs/{now}"
@@ -17,21 +17,24 @@ model:
   vit_embed_dim: 512
   vit_depth: 4
   vit_heads: 8
+  vit_img_size: 16
+  vit_patch_size: 2
 
 training:
-  epochs: 100
+  epochs: 200
   lr: 0.0001
   weight_decay: 0.01
   use_amp: true
-  early_stopping_patience: 10
+  early_stopping_metric: loss  # or "f1"
+  early_stopping_patience: 30
 
 loss:
   focal:
     alpha: 0.25
-    gamma: 1.0
-    boundary_weight: 0.2
+    gamma: 1.5
+    boundary_weight: 0.4
   tversky:
-    alpha: 0.3
-    beta: 0.7
+    alpha: 0.2
+    beta: 0.8
 
 gradient_clipping: 1.0

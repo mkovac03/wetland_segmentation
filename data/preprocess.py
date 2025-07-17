@@ -7,6 +7,7 @@ import numpy as np
 from tqdm import tqdm
 import argparse
 import yaml
+import json
 
 # ========== Utility ==========
 def center_crop(array, target_size=(512, 512)):
@@ -25,6 +26,7 @@ def center_crop(array, target_size=(512, 512)):
     else:
         raise ValueError(f"Unsupported array shape for cropping: {array.shape}")
 
+# ========== Config & Args ==========
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="configs/config.yaml")
 args = parser.parse_args()
@@ -35,16 +37,19 @@ with open(args.config, "r") as f:
 INPUT_DIR = config["input_dir"]
 OUTPUT_DIR = config["processed_dir"]
 TARGET_CRS = config["crs_target"]
+INPUT_CHANNELS = config["input_channels"]
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"Saving processed outputs to {OUTPUT_DIR}")
 
 files = glob.glob(os.path.join(INPUT_DIR, '*.tif'))
 
+# ========== Processing Loop ==========
 for f in tqdm(files):
     needs_crop = False
 
     with rasterio.open(f) as src:
+        # Reproject if needed
         if src.crs.to_string() != TARGET_CRS:
             dst_path = os.path.join(OUTPUT_DIR, os.path.basename(f).replace('.tif', '_reproj.tif'))
             transform, width, height = calculate_default_transform(
@@ -83,10 +88,12 @@ for f in tqdm(files):
         ignore_val = 255
         label[label == nodata_val] = ignore_val
 
-        # Define sparse → dense remap
-        valid_classes = [0, 1, 2, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+        # Merge classes 21 and 22 → 20
+        label[np.isin(label, [21, 22])] = 20
+
+        # Define remap
+        valid_classes = [0, 1, 2, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         remap_dict = {old: new for new, old in enumerate(valid_classes)}
-        inverse_remap = {v: k for k, v in remap_dict.items()}
         num_classes = len(remap_dict)
 
         # Apply remapping
@@ -95,20 +102,27 @@ for f in tqdm(files):
             remapped_label[label == old] = new
         label = remapped_label
 
+        # Optional: skip mostly-background tiles
+        background_label = remap_dict.get(0, None)
+        if background_label is not None:
+            background_ratio = np.sum(label == background_label) / label.size
+            if background_ratio > 0.70:
+                # print(f"Skipping {out_path}: {background_ratio * 100:.1f}% background")
+                continue
+
         # Save remap dict once
         if not os.path.exists("data/label_remap.json"):
             os.makedirs("data", exist_ok=True)
-            import json
-
             with open("data/label_remap.json", "w") as f:
                 json.dump(remap_dict, f)
             print("Saved label remap to data/label_remap.json")
 
         # Read image *after* label handling
-        if src.count < config["input_channels"] + 1:
-            print(f"Skipping {out_path}, has only {src.count} bands")
+        # print(f"[DEBUG] {os.path.basename(out_path)} has {src.count} bands, needs at least {INPUT_CHANNELS + 1}")
+        if src.count < INPUT_CHANNELS + 1:
+            # print(f"Skipping {out_path}, has only {src.count} bands")
             continue
-        image = src.read(list(range(2, 2 + config["input_channels"]))).astype(np.float32)
+        image = src.read(list(range(2, 2 + INPUT_CHANNELS))).astype(np.float32)
 
         # Crop if needed
         if needs_crop:
@@ -117,15 +131,15 @@ for f in tqdm(files):
             if label.shape != (512, 512):
                 label = center_crop(label, (512, 512))
 
-        # Optional: mask image where label is ignore
+        # Mask ignore labels
         mask = label != ignore_val
         image = image * mask[None, :, :]
 
-        # Final assert to catch broken tiles
+        # Validate label integrity
         assert np.all(
             (label == ignore_val) | ((label >= 0) & (label < num_classes))), f"{out_path}: Label out of bounds"
 
+        # Save
         base = os.path.splitext(os.path.basename(out_path))[0].replace('_reproj', '')
         np.save(os.path.join(OUTPUT_DIR, f"{base}_img.npy"), image)
         np.save(os.path.join(OUTPUT_DIR, f"{base}_lbl.npy"), label)
-
