@@ -9,7 +9,7 @@ crs_target: "EPSG:32632"
 patch_size: 512
 stride: 512
 batch_size: 4
-num_classes: 20
+num_classes: 16
 input_channels: 29
 
 model:

@@ -51,19 +51,32 @@ with open("data/label_remap.json", "r") as f:
     inverse_remap = {v: int(k) for k, v in json.load(f).items()}
 
 # ========== Utilities ==========
-def parse_best_epoch(log_path):
+def parse_best_epoch(log_path, fallback_txt_path=None):
+    # First try best_epoch.txt if available
+    if fallback_txt_path and os.path.exists(fallback_txt_path):
+        with open(fallback_txt_path, "r") as f:
+            line = f.readline().strip()
+            if "," in line:
+                epoch, f1 = line.split(",")
+                return int(epoch), float(f1)
+
+    # Fallback to parsing CSV-style training log
     best_f1 = -1
     best_epoch = None
     with open(log_path, "r") as f:
         for line in f:
-            if line.startswith("Epoch"):
-                parts = line.strip().split(",")
-                epoch_num = int(parts[0].split()[1])
-                f1_score = float(parts[-1].split(":")[1].strip())
-                if f1_score > best_f1:
-                    best_f1 = f1_score
-                    best_epoch = epoch_num
+            parts = line.strip().split(",")
+            if len(parts) >= 5:
+                try:
+                    epoch_num = int(parts[0])
+                    f1_score = float(parts[-1])
+                    if f1_score > best_f1:
+                        best_f1 = f1_score
+                        best_epoch = epoch_num
+                except:
+                    continue
     return best_epoch, best_f1
+
 
 def load_model(ckpt_path):
     model = ResNetUNetViT(n_classes=NUM_CLASSES, input_channels=INPUT_CHANNELS).cuda()
@@ -74,29 +87,45 @@ def load_model(ckpt_path):
 def run_inference(model, input_tif, output_tif):
     with rasterio.open(input_tif) as src:
         meta = src.meta.copy()
-        meta.update(count=1, dtype='uint8')
-        if 'nodata' in meta and (meta['nodata'] is None or not (0 <= meta['nodata'] <= 255)):
-            meta['nodata'] = None
+        meta.update(count=1, dtype='uint8', compress='lzw')
+
+        h, w = src.height, src.width
+        pred_accum = np.zeros((NUM_CLASSES, h, w), dtype=np.float32)
+        weight_map = np.zeros((h, w), dtype=np.float32)
+
+        for y in range(0, h, STRIDE):
+            for x in range(0, w, STRIDE):
+                window = Window(x, y, PATCH_SIZE, PATCH_SIZE)
+                img = src.read(list(range(2, 2 + INPUT_CHANNELS)), window=window, boundless=True, fill_value=0).astype(np.float32)
+
+                if img.shape[1] < PATCH_SIZE or img.shape[2] < PATCH_SIZE:
+                    pad_img = np.zeros((img.shape[0], PATCH_SIZE, PATCH_SIZE), dtype=np.float32)
+                    pad_img[:, :img.shape[1], :img.shape[2]] = img
+                    img = pad_img
+
+                img_tensor = torch.from_numpy(img).unsqueeze(0).cuda()
+                with torch.no_grad():
+                    logits = model(img_tensor).squeeze(0).cpu().numpy()  # [C, H, W]
+
+                x0, y0 = x, y
+                x1, y1 = x + PATCH_SIZE, y + PATCH_SIZE
+                pred_accum[:, y0:y1, x0:x1] += logits[:, :min(h - y0, PATCH_SIZE), :min(w - x0, PATCH_SIZE)]
+                weight_map[y0:y1, x0:x1] += 1
+
+        # Normalize logits by weight map
+        weight_map = np.clip(weight_map, a_min=1e-6, a_max=None)
+        avg_logits = pred_accum / weight_map
+
+        pred = np.argmax(avg_logits, axis=0).astype(np.uint8)
+        decoded = np.vectorize(lambda x: inverse_remap.get(x, 255))(pred)
 
         with rasterio.open(output_tif, 'w', **meta) as dst:
-            for y in range(0, src.height, STRIDE):
-                for x in range(0, src.width, STRIDE):
-                    window = Window(x, y, PATCH_SIZE, PATCH_SIZE)
-                    img = src.read(list(range(2, 2 + INPUT_CHANNELS)), window=window).astype(np.float32)
+            dst.write(decoded.astype(np.uint8), 1)
 
-                    if img.shape[1] < PATCH_SIZE or img.shape[2] < PATCH_SIZE:
-                        continue
-
-                    img_tensor = torch.from_numpy(img).unsqueeze(0).cuda()
-                    with torch.no_grad():
-                        pred = model(img_tensor).argmax(1).squeeze().cpu().numpy()
-
-                    decoded = np.vectorize(lambda x: inverse_remap.get(x, 255))(pred).astype("uint8")
-                    dst.write(decoded, 1, window=window)
 
 # ========== Main ==========
 if __name__ == "__main__":
-    best_epoch, best_f1 = parse_best_epoch(LOG_PATH)
+    best_epoch, best_f1 = parse_best_epoch(LOG_PATH, fallback_txt_path=os.path.join(CKPT_DIR, "best_epoch.txt"))
     if best_epoch is None:
         raise RuntimeError("No valid epoch found in training log.")
 

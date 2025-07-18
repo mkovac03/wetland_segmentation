@@ -88,11 +88,15 @@ for f in tqdm(files):
         ignore_val = 255
         label[label == nodata_val] = ignore_val
 
-        # Merge classes 21 and 22 → 20
-        label[np.isin(label, [21, 22])] = 20
+        # ========== Merge classes BEFORE remap ==========
+        # Merge 4 and 6 into 2
+        label[np.isin(label, [4, 6])] = 2
 
-        # Define remap
-        valid_classes = [0, 1, 2, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        # Merge 16, 20, 21, 22 into 16
+        label[np.isin(label, [16, 20, 21, 22])] = 16
+
+        # Define valid classes AFTER merging
+        valid_classes = [0, 1, 2, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
         remap_dict = {old: new for new, old in enumerate(valid_classes)}
         num_classes = len(remap_dict)
 
