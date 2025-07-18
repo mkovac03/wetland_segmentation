@@ -144,8 +144,6 @@ The model is a **ResNet-UNet-ViT hybrid** that fuses convolutional and attention
 
 ## 🧪 Data Augmentation
 
-* Implemented via `RandomFlipRotate`:
-
   * Random horizontal & vertical flips
   * Random 90°, 180°, 270° rotations
   * Applied only during training, not validation/test
