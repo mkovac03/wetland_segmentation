@@ -3,7 +3,11 @@
 This project performs high-resolution semantic segmentation of wetlands across Europe using a hybrid CNN-ViT architecture trained on 10-meter satellite imagery. It addresses the challenge of weak supervision from coarse-resolution 100-meter labels by applying label-aware loss weighting and boundary enhancement strategies to sharpen spatial accuracy at the native 10 m scale. The dataset exhibits strong class imbalance, which is handled through a combination of focal and class-weighted loss functions, improving minority class detection. It uses weak supervision from 100-meter wetland type labels and powerful spectral-temporal embeddings from Google’s Earth Engine dataset.
 
 ---
-![ResUNetViT](ResUNetViT.png)
+
+![Model Overview](architecture.png)
+
+<div style="display: flex; align-items: flex-start; gap: 20px;">
+  <div style="flex: 1;">
 
 ## 🌍 Datasets
 
@@ -42,7 +46,7 @@ This project performs high-resolution semantic segmentation of wetlands across E
   * Global 64-band spectral-temporal embedding trained via contrastive learning
   * Derived from Sentinel-1, Sentinel-2, and Landsat time series
 * **Resolution**: 10 m
-* **Coverage**: Europe-wide
+* **Coverage**: Global
 * **Selected Features**:
 
   * 29 pre-selected image channels
@@ -80,7 +84,6 @@ This project performs high-resolution semantic segmentation of wetlands across E
 ```
 
 ---
-
 
 ## 🚀 Quick Start
 
