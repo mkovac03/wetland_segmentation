@@ -87,7 +87,7 @@ def load_model(ckpt_path):
 def run_inference(model, input_tif, output_tif):
     with rasterio.open(input_tif) as src:
         meta = src.meta.copy()
-        meta.update(count=1, dtype='uint8', compress='lzw')
+        meta.update(count=1, dtype='uint8', compress='lzw', nodata=255)  # safe nodata
 
         h, w = src.height, src.width
         pred_accum = np.zeros((NUM_CLASSES, h, w), dtype=np.float32)
@@ -117,10 +117,14 @@ def run_inference(model, input_tif, output_tif):
         avg_logits = pred_accum / weight_map
 
         pred = np.argmax(avg_logits, axis=0).astype(np.uint8)
+
+        # Remap to original label values, clip to uint8-safe range
         decoded = np.vectorize(lambda x: inverse_remap.get(x, 255))(pred)
+        decoded = np.clip(decoded, 0, 255).astype(np.uint8)
 
         with rasterio.open(output_tif, 'w', **meta) as dst:
-            dst.write(decoded.astype(np.uint8), 1)
+            dst.write(decoded, 1)
+
 
 
 # ========== Main ==========
