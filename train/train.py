@@ -18,7 +18,7 @@ from torchvision.transforms.functional import to_tensor
 
 from data.dataset import GoogleEmbedDataset
 from data.transform import RandomFlipRotate
-from models.resunet_vit import ResNetUNetViT
+from models.resunet_vit_configurable import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
 from losses.focal_tversky import CombinedFocalTverskyLoss
 
@@ -78,7 +78,7 @@ train_loader = DataLoader(train_ds, batch_size=config["batch_size"], sampler=sam
 val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
 
 # ========= Model =========
-model = ResNetUNetViT(n_classes=config["num_classes"], input_channels=config["input_channels"]).cuda()
+model = ResNetUNetViT(config).cuda()
 print("Device:", next(model.parameters()).device)
 
 optimizer = optim.AdamW(model.parameters(),
