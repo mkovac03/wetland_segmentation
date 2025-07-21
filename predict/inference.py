@@ -50,9 +50,16 @@ OUTPUT_DIR = os.path.join(BASE_DIR, f"outputs/predictions_Denmark2018_{timestamp
 with open("data/label_remap.json", "r") as f:
     inverse_remap = {v: int(k) for k, v in json.load(f).items()}
 
+# ========== Load Human-Readable Class Names ==========
+label_names = {}
+try:
+    with open("data/label_remap_longnames.json", "r") as f:
+        label_names = json.load(f)
+except FileNotFoundError:
+    print("[WARNING] label_remap_longnames.json not found. Proceeding without label names.")
+
 # ========== Utilities ==========
 def parse_best_epoch(log_path, fallback_txt_path=None):
-    # First try best_epoch.txt if available
     if fallback_txt_path and os.path.exists(fallback_txt_path):
         with open(fallback_txt_path, "r") as f:
             line = f.readline().strip()
@@ -60,7 +67,6 @@ def parse_best_epoch(log_path, fallback_txt_path=None):
                 epoch, f1 = line.split(",")
                 return int(epoch), float(f1)
 
-    # Fallback to parsing CSV-style training log
     best_f1 = -1
     best_epoch = None
     with open(log_path, "r") as f:
@@ -77,7 +83,6 @@ def parse_best_epoch(log_path, fallback_txt_path=None):
                     continue
     return best_epoch, best_f1
 
-
 def load_model(ckpt_path):
     model = ResNetUNetViT(n_classes=NUM_CLASSES, input_channels=INPUT_CHANNELS).cuda()
     model.load_state_dict(torch.load(ckpt_path))
@@ -87,7 +92,7 @@ def load_model(ckpt_path):
 def run_inference(model, input_tif, output_tif):
     with rasterio.open(input_tif) as src:
         meta = src.meta.copy()
-        meta.update(count=1, dtype='uint8', compress='lzw', nodata=255)  # safe nodata
+        meta.update(count=1, dtype='uint8', compress='lzw', nodata=255)
 
         h, w = src.height, src.width
         pred_accum = np.zeros((NUM_CLASSES, h, w), dtype=np.float32)
@@ -105,27 +110,27 @@ def run_inference(model, input_tif, output_tif):
 
                 img_tensor = torch.from_numpy(img).unsqueeze(0).cuda()
                 with torch.no_grad():
-                    logits = model(img_tensor).squeeze(0).cpu().numpy()  # [C, H, W]
+                    logits = model(img_tensor).squeeze(0).cpu().numpy()
 
                 x0, y0 = x, y
                 x1, y1 = x + PATCH_SIZE, y + PATCH_SIZE
                 pred_accum[:, y0:y1, x0:x1] += logits[:, :min(h - y0, PATCH_SIZE), :min(w - x0, PATCH_SIZE)]
                 weight_map[y0:y1, x0:x1] += 1
 
-        # Normalize logits by weight map
         weight_map = np.clip(weight_map, a_min=1e-6, a_max=None)
         avg_logits = pred_accum / weight_map
 
         pred = np.argmax(avg_logits, axis=0).astype(np.uint8)
 
-        # Remap to original label values, clip to uint8-safe range
         decoded = np.vectorize(lambda x: inverse_remap.get(x, 255))(pred)
         decoded = np.clip(decoded, 0, 255).astype(np.uint8)
 
+        if label_names:
+            class_descriptions = [label_names.get(str(inverse_remap.get(c, 255)), f"Class {c}") for c in range(NUM_CLASSES)]
+            meta["descriptions"] = tuple(class_descriptions)
+
         with rasterio.open(output_tif, 'w', **meta) as dst:
             dst.write(decoded, 1)
-
-
 
 # ========== Main ==========
 if __name__ == "__main__":

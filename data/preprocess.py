@@ -89,14 +89,14 @@ for f in tqdm(files):
         label[label == nodata_val] = ignore_val
 
         # ========== Merge classes BEFORE remap ==========
-        # Merge 4 and 6 into 2
-        label[np.isin(label, [4, 6])] = 2
+        # Merge 2, 4, 6 into 2 → Riparian/fluvial forests
+        label[np.isin(label, [2, 4, 6])] = 2
 
-        # Merge 16, 20, 21, 22 into 16
-        label[np.isin(label, [16, 20, 21, 22])] = 16
+        # Merge 16, 17, 20, 21, 22 into 16 → Surface water
+        label[np.isin(label, [16, 17, 20, 21, 22])] = 16
 
         # Define valid classes AFTER merging
-        valid_classes = [0, 1, 2, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        valid_classes = [0, 1, 2, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19]
         remap_dict = {old: new for new, old in enumerate(valid_classes)}
         num_classes = len(remap_dict)
 
@@ -111,7 +111,6 @@ for f in tqdm(files):
         if background_label is not None:
             background_ratio = np.sum(label == background_label) / label.size
             if background_ratio > 0.95:
-                # print(f"Skipping {out_path}: {background_ratio * 100:.1f}% background")
                 continue
 
         # Save remap dict once
@@ -121,10 +120,30 @@ for f in tqdm(files):
                 json.dump(remap_dict, f)
             print("Saved label remap to data/label_remap.json")
 
+        # Also save long name mapping
+        label_names = {
+            0:  "No Wetland",
+            1:  "Rice Fields",
+            2:  "Riparian, fluvial and swamp forest (broadleaved, coniferous, mixed)",
+            3:  "Managed or grazed wet meadow or pasture",
+            4:  "Natural seasonally or permanently wet grasslands",
+            5:  "Wet heaths",
+            6:  "Riverine and fen scrubs",
+            7:  "Beaches, dunes, sand",
+            8:  "Inland marshes",
+            9:  "Open mires",
+            10: "Salt marshes",
+            11: "Surface water (lagoons, estuaries, rivers, lakes, shallow marine waters)",
+            12: "Coastal saltpans (highly artificial salinas)",
+            13: "Intertidal flats"
+        }
+        if not os.path.exists("data/label_remap_longnames.json"):
+            with open("data/label_remap_longnames.json", "w") as f:
+                json.dump(label_names, f, indent=2)
+            print("Saved long label names to data/label_remap_longnames.json")
+
         # Read image *after* label handling
-        # print(f"[DEBUG] {os.path.basename(out_path)} has {src.count} bands, needs at least {INPUT_CHANNELS + 1}")
         if src.count < INPUT_CHANNELS + 1:
-            # print(f"Skipping {out_path}, has only {src.count} bands")
             continue
         image = src.read(list(range(2, 2 + INPUT_CHANNELS))).astype(np.float32)
 

@@ -1,6 +1,7 @@
 import os
 import glob
 import subprocess
+import json
 from datetime import datetime
 
 # Base predictions directory
@@ -16,6 +17,7 @@ if not prediction_folders:
 predictions_dir = prediction_folders[0]
 timestamp = os.path.basename(predictions_dir).split("_")[-1]
 vrt_output_path = os.path.join(base_dir, f"predictions_Denmark2018_{timestamp}.vrt")
+qml_output_path = os.path.join(base_dir, f"predictions_Denmark2018_{timestamp}.qml")
 
 # Get all .tif files
 tif_files = glob.glob(os.path.join(predictions_dir, "*.tif"))
@@ -24,13 +26,50 @@ if len(tif_files) == 0:
 
 # Build VRT command
 cmd = ["gdalbuildvrt", "-overwrite", vrt_output_path] + tif_files
-
 print(f"Building VRT at {vrt_output_path} with {len(tif_files)} tiles...")
-
 result = subprocess.run(cmd, capture_output=True, text=True)
 
 if result.returncode != 0:
     print("Error building VRT:")
     print(result.stderr)
+    exit(1)
 else:
     print("VRT successfully created.")
+
+# Load label names from remap file
+try:
+    with open("data/label_remap_longnames.json", "r") as f:
+        label_names = json.load(f)
+except FileNotFoundError:
+    print("[WARNING] label_remap_longnames.json not found. Cannot create QML.")
+    exit(0)
+
+# Generate a basic QML file for QGIS (customizable)
+color_table = [
+    "#1f78b4", "#33a02c", "#e31a1c", "#ff7f00", "#6a3d9a", "#b15928", "#a6cee3",
+    "#b2df8a", "#fb9a99", "#fdbf6f", "#cab2d6", "#ffff99", "#8dd3c7", "#ffffb3"
+]  # Add more as needed
+
+qml_lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<qgis>',
+    '  <renderer-v2 type="singlebandpseudocolor" forcerasterrenderer="0" band="1" classificationMin="0" classificationMax="255">',
+    '    <rastershader>',
+    '      <colorrampshader type="discrete" clip="0">'
+]
+
+for i, (class_id, name) in enumerate(sorted((int(k), v) for k, v in label_names.items())):
+    color = color_table[i % len(color_table)]
+    qml_lines.append(f'        <item alpha="255" value="{class_id}" label="{name}" color="{color}"/>')
+
+qml_lines += [
+    '      </colorrampshader>',
+    '    </rastershader>',
+    '  </renderer-v2>',
+    '</qgis>'
+]
+
+with open(qml_output_path, "w") as f:
+    f.write("\n".join(qml_lines))
+
+print(f"QML file written to {qml_output_path}")
