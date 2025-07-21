@@ -84,7 +84,7 @@ def parse_best_epoch(log_path, fallback_txt_path=None):
     return best_epoch, best_f1
 
 def load_model(ckpt_path):
-    model = ResNetUNetViT(n_classes=NUM_CLASSES, input_channels=INPUT_CHANNELS).cuda()
+    model = ResNetUNetViT(config).cuda()
     model.load_state_dict(torch.load(ckpt_path))
     model.eval()
     return model
