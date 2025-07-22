@@ -107,11 +107,12 @@ patience = config["training"]["early_stopping_patience"]
 no_improve = 0
 
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min" if es_metric == "loss" else "max",
-    factor=config.get("scheduler", {}).get("factor", 0.5),
-    patience=config.get("scheduler", {}).get("patience", 5),
-    verbose=True
+    optimizer,
+    mode="min" if es_metric=="loss" else "max",
+    factor=config.get("scheduler",{}).get("factor",0.5),
+    patience=config.get("scheduler",{}).get("patience",5)
 )
+
 
 # ========= Logging =========
 os.makedirs(config["output_dir"], exist_ok=True)
