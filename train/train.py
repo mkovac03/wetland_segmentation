@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from PIL import Image
@@ -127,7 +127,7 @@ for epoch in range(config["training"]["epochs"]):
     for x, y in tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['training']['epochs']}"):
         x, y = x.cuda(), y.cuda()
         optimizer.zero_grad()
-        with autocast(enabled=config["training"]["use_amp"]):
+        with autocast(device_type='cuda', enabled=config["training"]["use_amp"]):
             out = model(x)
             loss = ft_loss(out, y) + ce_loss(out, y)
 
