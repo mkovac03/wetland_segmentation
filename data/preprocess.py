@@ -88,17 +88,35 @@ for f in tqdm(files):
         ignore_val = 255
         label[label == nodata_val] = ignore_val
 
-        # ========== Merge classes BEFORE remap ==========
-        # Merge 2, 4, 6 into 2 → Riparian/fluvial forests
-        label[np.isin(label, [2, 4, 6])] = 2
+        # ========== Merge and remap labels ==========
+        ignore_val = 255
+        nodata_val = -32768
+        label[label == nodata_val] = ignore_val
 
-        # Merge 16, 17, 20, 21, 22 into 16 → Surface water
-        label[np.isin(label, [16, 17, 20, 21, 22])] = 16
+        # Merge classes based on specification
+        merge_map = {
+            0: [0],
+            1: [1],
+            2: [2, 4, 6],
+            3: [8],
+            4: [9],
+            5: [10],
+            6: [11],
+            7: [12],
+            8: [13],
+            9: [14],
+            10: [15],
+            11: [16, 17, 20, 21, 22],
+            12: [18],
+            13: [19]
+        }
 
-        # Define valid classes AFTER merging
-        valid_classes = [0, 1, 2, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19]
-        remap_dict = {old: new for new, old in enumerate(valid_classes)}
-        num_classes = len(remap_dict)
+        # Flatten mapping: reverse-lookup from original ID → remapped ID
+        remap_dict = {}
+        for new_id, old_ids in merge_map.items():
+            for old_id in old_ids:
+                remap_dict[old_id] = new_id
+        num_classes = len(merge_map)
 
         # Apply remapping
         remapped_label = np.full_like(label, ignore_val, dtype=np.uint8)
@@ -122,21 +140,22 @@ for f in tqdm(files):
 
         # Also save long name mapping
         label_names = {
-            0:  "No Wetland",
-            1:  "Rice Fields",
-            2:  "Riparian, fluvial and swamp forest (broadleaved, coniferous, mixed)",
-            3:  "Managed or grazed wet meadow or pasture",
-            4:  "Natural seasonally or permanently wet grasslands",
-            5:  "Wet heaths",
-            6:  "Riverine and fen scrubs",
-            7:  "Beaches, dunes, sand",
-            8:  "Inland marshes",
-            9:  "Open mires",
+            0: "No Wetland",
+            1: "Rice Fields",
+            2: "Riparian, fluvial and swamp forest (broadleaved, coniferous, mixed)",
+            3: "Managed or grazed wet meadow or pasture",
+            4: "Natural seasonally or permanently wet grasslands",
+            5: "Wet heaths",
+            6: "Riverine and fen scrubs",
+            7: "Beaches, dunes, sand",
+            8: "Inland marshes",
+            9: "Open mires",
             10: "Salt marshes",
             11: "Surface water (lagoons, estuaries, rivers, lakes, shallow marine waters)",
             12: "Coastal saltpans (highly artificial salinas)",
             13: "Intertidal flats"
         }
+
         if not os.path.exists("data/label_remap_longnames.json"):
             with open("data/label_remap_longnames.json", "w") as f:
                 json.dump(label_names, f, indent=2)

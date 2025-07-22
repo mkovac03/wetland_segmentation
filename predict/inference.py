@@ -98,29 +98,41 @@ def run_inference(model, input_tif, output_tif):
         pred_accum = np.zeros((NUM_CLASSES, h, w), dtype=np.float32)
         weight_map = np.zeros((h, w), dtype=np.float32)
 
+        if STRIDE >= PATCH_SIZE:
+            print(f"[WARNING] STRIDE ({STRIDE}) >= PATCH_SIZE ({PATCH_SIZE}) — may cause gaps.")
+
         for y in range(0, h, STRIDE):
             for x in range(0, w, STRIDE):
                 window = Window(x, y, PATCH_SIZE, PATCH_SIZE)
-                img = src.read(list(range(2, 2 + INPUT_CHANNELS)), window=window, boundless=True, fill_value=0).astype(np.float32)
+                img = src.read(list(range(2, 2 + INPUT_CHANNELS)),
+                               window=window,
+                               boundless=True,
+                               fill_value=0).astype(np.float32)
 
-                if img.shape[1] < PATCH_SIZE or img.shape[2] < PATCH_SIZE:
+                padded = False
+                pad_bottom = max(0, PATCH_SIZE - img.shape[1])
+                pad_right = max(0, PATCH_SIZE - img.shape[2])
+                if pad_bottom > 0 or pad_right > 0:
+                    padded = True
                     pad_img = np.zeros((img.shape[0], PATCH_SIZE, PATCH_SIZE), dtype=np.float32)
                     pad_img[:, :img.shape[1], :img.shape[2]] = img
                     img = pad_img
 
                 img_tensor = torch.from_numpy(img).unsqueeze(0).cuda()
                 with torch.no_grad():
-                    logits = model(img_tensor).squeeze(0).cpu().numpy()
+                    logits = model(img_tensor).squeeze(0).cpu()
+                    probs = torch.nn.functional.softmax(logits, dim=0).numpy()
 
-                x0, y0 = x, y
-                x1, y1 = x + PATCH_SIZE, y + PATCH_SIZE
-                pred_accum[:, y0:y1, x0:x1] += logits[:, :min(h - y0, PATCH_SIZE), :min(w - x0, PATCH_SIZE)]
-                weight_map[y0:y1, x0:x1] += 1
+                y1 = min(y + PATCH_SIZE, h)
+                x1 = min(x + PATCH_SIZE, w)
+                dy, dx = y1 - y, x1 - x
 
-        weight_map = np.clip(weight_map, a_min=1e-6, a_max=None)
-        avg_logits = pred_accum / weight_map
+                pred_accum[:, y:y1, x:x1] += probs[:, :dy, :dx]
+                weight_map[y:y1, x:x1] += 1
 
-        pred = np.argmax(avg_logits, axis=0).astype(np.uint8)
+        weight_map = np.clip(weight_map, 1e-6, None)
+        avg_probs = pred_accum / weight_map
+        pred = np.argmax(avg_probs, axis=0).astype(np.uint8)
 
         decoded = np.vectorize(lambda x: inverse_remap.get(x, 255))(pred)
         decoded = np.clip(decoded, 0, 255).astype(np.uint8)
@@ -131,6 +143,7 @@ def run_inference(model, input_tif, output_tif):
 
         with rasterio.open(output_tif, 'w', **meta) as dst:
             dst.write(decoded, 1)
+
 
 # ========== Main ==========
 if __name__ == "__main__":

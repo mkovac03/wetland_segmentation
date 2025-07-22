@@ -44,27 +44,30 @@ except FileNotFoundError:
     print("[WARNING] label_remap_longnames.json not found. Cannot create QML.")
     exit(0)
 
-# Generate a basic QML file for QGIS (customizable)
+# Generate a discrete QML with transparency for No Wetland (ID 0)
 color_table = [
     "#1f78b4", "#33a02c", "#e31a1c", "#ff7f00", "#6a3d9a", "#b15928", "#a6cee3",
     "#b2df8a", "#fb9a99", "#fdbf6f", "#cab2d6", "#ffff99", "#8dd3c7", "#ffffb3"
-]  # Add more as needed
+]  # At least 14 distinct colors
 
 qml_lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<qgis>',
-    '  <renderer-v2 type="singlebandpseudocolor" forcerasterrenderer="0" band="1" classificationMin="0" classificationMax="255">',
-    '    <rastershader>',
-    '      <colorrampshader type="discrete" clip="0">'
+    '  <renderer-v2 type="paletted" forcerasterrenderer="0" band="1">',
+    '    <paletteEntries>'
 ]
 
+# Sort by integer class ID
 for i, (class_id, name) in enumerate(sorted((int(k), v) for k, v in label_names.items())):
-    color = color_table[i % len(color_table)]
-    qml_lines.append(f'        <item alpha="255" value="{class_id}" label="{name}" color="{color}"/>')
+    color = color_table[i % len(color_table)].lstrip("#")
+    r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+    alpha = 0 if class_id == 0 else 255
+    qml_lines.append(
+        f'      <paletteEntry value="{class_id}" label="{name}" color="{r},{g},{b},{alpha}"/>'
+    )
 
 qml_lines += [
-    '      </colorrampshader>',
-    '    </rastershader>',
+    '    </paletteEntries>',
     '  </renderer-v2>',
     '</qgis>'
 ]
