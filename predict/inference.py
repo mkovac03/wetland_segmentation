@@ -89,6 +89,16 @@ def load_model(ckpt_path):
     model.eval()
     return model
 
+def gaussian_weight_mask(h, w, sigma=None):
+    """Generates a normalized 2D Gaussian weight mask"""
+    if sigma is None:
+        sigma = h // 6
+    y, x = np.indices((h, w))
+    center_y, center_x = h // 2, w // 2
+    mask = np.exp(-((x - center_x) ** 2 + (y - center_y) ** 2) / (2 * sigma ** 2))
+    return mask / mask.max()
+
+
 def run_inference(model, input_tif, output_tif):
     with rasterio.open(input_tif) as src:
         meta = src.meta.copy()
@@ -100,6 +110,12 @@ def run_inference(model, input_tif, output_tif):
 
         if STRIDE >= PATCH_SIZE:
             print(f"[WARNING] STRIDE ({STRIDE}) >= PATCH_SIZE ({PATCH_SIZE}) — may cause gaps.")
+        else:
+            overlap = 100 - (100 * STRIDE / PATCH_SIZE)
+            print(f"[INFO] Using stride = {STRIDE} ({overlap:.1f}% overlap)")
+
+        # Precompute Gaussian weight mask
+        gauss_mask = gaussian_weight_mask(PATCH_SIZE, PATCH_SIZE)
 
         for y in range(0, h, STRIDE):
             for x in range(0, w, STRIDE):
@@ -109,7 +125,6 @@ def run_inference(model, input_tif, output_tif):
                                boundless=True,
                                fill_value=0).astype(np.float32)
 
-                padded = False
                 pad_bottom = max(0, PATCH_SIZE - img.shape[1])
                 pad_right = max(0, PATCH_SIZE - img.shape[2])
                 if pad_bottom > 0 or pad_right > 0:
@@ -127,8 +142,8 @@ def run_inference(model, input_tif, output_tif):
                 x1 = min(x + PATCH_SIZE, w)
                 dy, dx = y1 - y, x1 - x
 
-                pred_accum[:, y:y1, x:x1] += probs[:, :dy, :dx]
-                weight_map[y:y1, x:x1] += 1
+                pred_accum[:, y:y1, x:x1] += probs[:, :dy, :dx] * gauss_mask[:dy, :dx]
+                weight_map[y:y1, x:x1] += gauss_mask[:dy, :dx]
 
         weight_map = np.clip(weight_map, 1e-6, None)
         avg_probs = pred_accum / weight_map
@@ -143,6 +158,7 @@ def run_inference(model, input_tif, output_tif):
 
         with rasterio.open(output_tif, 'w', **meta) as dst:
             dst.write(decoded, 1)
+
 
 
 # ========== Main ==========

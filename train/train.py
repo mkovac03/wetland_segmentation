@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_tensor
 
 from data.dataset import GoogleEmbedDataset
-from data.transform import RandomFlipRotate
+from data.transform import RandomAugment
 from models.resunet_vit import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
 from losses.focal_tversky import CombinedFocalTverskyLoss
@@ -42,7 +42,7 @@ with open(config["splits_path"], "r") as f:
     splits = json.load(f)
 
 # ========= Dataset =========
-train_transform = RandomFlipRotate(p=0.5)
+train_transform = RandomAugment(p=0.5)
 train_ds = GoogleEmbedDataset(splits["train"], transform=train_transform)
 val_ds   = GoogleEmbedDataset(splits["val"])
 
