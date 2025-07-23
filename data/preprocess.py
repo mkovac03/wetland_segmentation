@@ -123,6 +123,17 @@ for f in tqdm(files):
         remapped_label = np.vectorize(lambda v: remap_dict.get(v, ignore_val))(label).astype(np.uint8)
         label = remapped_label
 
+        # ========== Post-remap: check for unexpected label values ==========
+        valid_ids = set(range(len(merge_map)))  # e.g. 0 to 13
+        observed_ids = set(np.unique(label[label != ignore_val]))
+        unexpected_ids = observed_ids - valid_ids
+
+        if unexpected_ids:
+            raise ValueError(
+                f"[ERROR] Tile {os.path.basename(f)} contains unexpected remapped label(s): {sorted(unexpected_ids)}.\n"
+                f"Check remap_dict and raw label values."
+            )
+
         # Optional: skip mostly-background tiles
         background_label = remap_dict.get(0, None)
         if background_label is not None:
