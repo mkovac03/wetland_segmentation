@@ -1,9 +1,9 @@
 # File: configs/config.yaml
 
 input_dir: "/media/lkm413/storage1/gee_embedding_download/images/Denmark/2018/29b/"
-processed_dir: "data/processed/20250723_104045"
-splits_path: "data/splits/splits_20250723_104045.json"
-output_dir: "outputs/20250723_104045"
+processed_dir: "data/processed/20250723_200500"
+splits_path: "data/splits/splits_20250723_200500.json"
+output_dir: "outputs/20250723_200500"
 crs_target: "EPSG:32632"
 
 patch_size: 512

@@ -162,11 +162,11 @@ for f in tqdm(files):
         os.makedirs("data", exist_ok=True)
         with open("data/label_remap.json", "w") as f:
             json.dump(remap_dict, f)
-        print("Saved label remap to data/label_remap.json")
+        # print("Saved label remap to data/label_remap.json")
 
         with open("data/label_remap_longnames.json", "w") as f:
             json.dump(label_names, f, indent=2)
-        print("Saved long label names to data/label_remap_longnames.json")
+        # print("Saved long label names to data/label_remap_longnames.json")
 
         # Read image *after* label handling
         if src.count < INPUT_CHANNELS + 1:
