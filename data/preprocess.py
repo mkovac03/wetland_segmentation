@@ -43,6 +43,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"Saving processed outputs to {OUTPUT_DIR}")
 
 files = glob.glob(os.path.join(INPUT_DIR, '*.tif'))
+all_observed_labels = set()
 
 # ========== Processing Loop ==========
 for f in tqdm(files):
@@ -126,6 +127,7 @@ for f in tqdm(files):
         # ========== Post-remap: check for unexpected label values ==========
         valid_ids = set(range(len(merge_map)))  # e.g. 0 to 13
         observed_ids = set(np.unique(label[label != ignore_val]))
+        all_observed_labels.update(observed_ids)
         unexpected_ids = observed_ids - valid_ids
 
         if unexpected_ids:
@@ -192,3 +194,6 @@ for f in tqdm(files):
         base = os.path.splitext(os.path.basename(out_path))[0].replace('_reproj', '')
         np.save(os.path.join(OUTPUT_DIR, f"{base}_img.npy"), image)
         np.save(os.path.join(OUTPUT_DIR, f"{base}_lbl.npy"), label)
+
+print(f"\n[SUMMARY] Unique remapped labels observed across all tiles: {sorted(all_observed_labels)}")
+
