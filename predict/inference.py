@@ -133,15 +133,14 @@ def run_inference(model, input_tif, output_tif):
                 img = src.read(list(range(2, 2 + INPUT_CHANNELS)),
                                window=window,
                                boundless=True,
-                               fill_value=0).astype(np.float32)
+                               fill_value=None).astype(np.float32)
 
-                pad_bottom = max(0, PATCH_SIZE - img.shape[1])
-                pad_right = max(0, PATCH_SIZE - img.shape[2])
-                if pad_bottom > 0 or pad_right > 0:
-                    padded = True
-                    pad_img = np.zeros((img.shape[0], PATCH_SIZE, PATCH_SIZE), dtype=np.float32)
-                    pad_img[:, :img.shape[1], :img.shape[2]] = img
-                    img = pad_img
+                # Handle out-of-bounds tiles (rasterio may clip them)
+                c, h_tile, w_tile = img.shape
+                if h_tile < PATCH_SIZE or w_tile < PATCH_SIZE:
+                    pad_bottom = PATCH_SIZE - h_tile
+                    pad_right = PATCH_SIZE - w_tile
+                    img = np.pad(img, ((0, 0), (0, pad_bottom), (0, pad_right)), mode="edge")
 
                 img_tensor = torch.from_numpy(img).unsqueeze(0).cuda()
                 with torch.no_grad():
