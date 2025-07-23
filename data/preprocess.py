@@ -81,7 +81,7 @@ for f in tqdm(files):
 
     with rasterio.open(out_path) as src:
         # Read label first
-        label = src.read(1)
+        label = src.read(1).astype(np.int32)
 
         # Replace NoData
         nodata_val = -32768
