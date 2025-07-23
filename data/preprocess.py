@@ -119,9 +119,8 @@ for f in tqdm(files):
         num_classes = len(merge_map)
 
         # Apply remapping
-        remapped_label = np.full_like(label, ignore_val, dtype=np.uint8)
-        for old, new in remap_dict.items():
-            remapped_label[label == old] = new
+        # Vectorized remap: fallback to 255 (ignore) if unmapped
+        remapped_label = np.vectorize(lambda v: remap_dict.get(v, ignore_val))(label).astype(np.uint8)
         label = remapped_label
 
         # Optional: skip mostly-background tiles
@@ -130,13 +129,6 @@ for f in tqdm(files):
             background_ratio = np.sum(label == background_label) / label.size
             if background_ratio > 0.95:
                 continue
-
-        # Save remap dict once
-        if not os.path.exists("data/label_remap.json"):
-            os.makedirs("data", exist_ok=True)
-            with open("data/label_remap.json", "w") as f:
-                json.dump(remap_dict, f)
-            print("Saved label remap to data/label_remap.json")
 
         # Also save long name mapping
         label_names = {
@@ -156,10 +148,14 @@ for f in tqdm(files):
             13: "Intertidal flats"
         }
 
-        if not os.path.exists("data/label_remap_longnames.json"):
-            with open("data/label_remap_longnames.json", "w") as f:
-                json.dump(label_names, f, indent=2)
-            print("Saved long label names to data/label_remap_longnames.json")
+        os.makedirs("data", exist_ok=True)
+        with open("data/label_remap.json", "w") as f:
+            json.dump(remap_dict, f)
+        print("Saved label remap to data/label_remap.json")
+
+        with open("data/label_remap_longnames.json", "w") as f:
+            json.dump(label_names, f, indent=2)
+        print("Saved long label names to data/label_remap_longnames.json")
 
         # Read image *after* label handling
         if src.count < INPUT_CHANNELS + 1:

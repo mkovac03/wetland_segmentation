@@ -50,6 +50,16 @@ OUTPUT_DIR = os.path.join(BASE_DIR, f"outputs/predictions_Denmark2018_{timestamp
 with open("data/label_remap.json", "r") as f:
     inverse_remap = {v: int(k) for k, v in json.load(f).items()}
 
+# ========== SAFETY CHECK ==========
+remapped_class_ids = sorted(inverse_remap.keys())
+print(f"[INFO] Inverse remap covers model class indices: {remapped_class_ids}")
+if len(remapped_class_ids) != NUM_CLASSES or max(remapped_class_ids) != NUM_CLASSES - 1:
+    raise ValueError(
+        f"[ERROR] Inconsistent remapping: model expects {NUM_CLASSES} classes, "
+        f"but inverse_remap has keys: {remapped_class_ids}"
+    )
+
+
 # ========== Load Human-Readable Class Names ==========
 label_names = {}
 try:
@@ -112,7 +122,7 @@ def run_inference(model, input_tif, output_tif):
             print(f"[WARNING] STRIDE ({STRIDE}) >= PATCH_SIZE ({PATCH_SIZE}) — may cause gaps.")
         else:
             overlap = 100 - (100 * STRIDE / PATCH_SIZE)
-            print(f"[INFO] Using stride = {STRIDE} ({overlap:.1f}% overlap)")
+            # print(f"[INFO] Using stride = {STRIDE} ({overlap:.1f}% overlap)")
 
         # Precompute Gaussian weight mask
         gauss_mask = gaussian_weight_mask(PATCH_SIZE, PATCH_SIZE)
