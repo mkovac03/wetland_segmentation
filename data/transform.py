@@ -46,9 +46,15 @@ class RandomAugment:
             img = img + noise
 
         # ----- Brightness/contrast jitter -----
+        # Brightness jitter (per channel)
         if random.random() < self.p:
-            img = TF.adjust_brightness(img, brightness_factor=random.uniform(0.9, 1.1))
-            img = TF.adjust_contrast(img, contrast_factor=random.uniform(0.9, 1.1))
+            brightness_factor = random.uniform(0.9, 1.1)
+            img = img * brightness_factor
+
+        # Contrast jitter (normalize–scale–restore)
+        if random.random() < self.p:
+            mean = img.mean(dim=(1, 2), keepdim=True)
+            img = (img - mean) * random.uniform(0.9, 1.1) + mean
 
         # ----- Gaussian blur -----
         if random.random() < self.blur_p:
