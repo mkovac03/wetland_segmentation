@@ -10,6 +10,7 @@ from rasterio.windows import Window
 from models.resunet_vit import ResNetUNetViT
 import yaml
 import re
+from scipy.special import softmax
 
 # ========== Load config ==========
 with open("configs/config.yaml", "r") as f:
@@ -52,13 +53,12 @@ with open("data/label_remap.json", "r") as f:
 
 # ========== SAFETY CHECK ==========
 remapped_class_ids = sorted(inverse_remap.keys())
-print(f"[INFO] Inverse remap covers model class indices: {remapped_class_ids}")
+print(f"[INFO] Model class indices: {remapped_class_ids}")
 if len(remapped_class_ids) != NUM_CLASSES or max(remapped_class_ids) != NUM_CLASSES - 1:
     raise ValueError(
         f"[ERROR] Inconsistent remapping: model expects {NUM_CLASSES} classes, "
         f"but inverse_remap has keys: {remapped_class_ids}"
     )
-
 
 # ========== Load Human-Readable Class Names ==========
 label_names = {}
@@ -99,76 +99,51 @@ def load_model(ckpt_path):
     model.eval()
     return model
 
-def gaussian_weight_mask(h, w, sigma=None):
-    """Generates a normalized 2D Gaussian weight mask"""
-    if sigma is None:
-        sigma = h // 6
-    y, x = np.indices((h, w))
-    center_y, center_x = h // 2, w // 2
-    mask = np.exp(-((x - center_x) ** 2 + (y - center_y) ** 2) / (2 * sigma ** 2))
-    return mask / mask.max()
-
-
 def run_inference(model, input_tif, output_tif):
     with rasterio.open(input_tif) as src:
         meta = src.meta.copy()
         meta.update(count=1, dtype='uint8', compress='lzw', nodata=255)
 
         h, w = src.height, src.width
-        pred_accum = np.zeros((NUM_CLASSES, h, w), dtype=np.float32)
+        logit_accum = np.zeros((NUM_CLASSES, h, w), dtype=np.float32)
         weight_map = np.zeros((h, w), dtype=np.float32)
-
-        if STRIDE >= PATCH_SIZE:
-            print(f"[WARNING] STRIDE ({STRIDE}) >= PATCH_SIZE ({PATCH_SIZE}) — may cause gaps.")
-        else:
-            overlap = 100 - (100 * STRIDE / PATCH_SIZE)
-            # print(f"[INFO] Using stride = {STRIDE} ({overlap:.1f}% overlap)")
-
-        # Precompute Gaussian weight mask
-        gauss_mask = gaussian_weight_mask(PATCH_SIZE, PATCH_SIZE)
 
         for y in range(0, h, STRIDE):
             for x in range(0, w, STRIDE):
-                window = Window(x, y, PATCH_SIZE, PATCH_SIZE)
-                img = src.read(list(range(2, 2 + INPUT_CHANNELS)),
-                               window=window,
-                               boundless=True,
-                               fill_value=None).astype(np.float32)
+                y1, x1 = y, x
+                y2 = min(y + PATCH_SIZE, h)
+                x2 = min(x + PATCH_SIZE, w)
+                dy, dx = y2 - y1, x2 - x1
 
-                # Handle out-of-bounds tiles (rasterio may clip them)
-                c, h_tile, w_tile = img.shape
-                if h_tile < PATCH_SIZE or w_tile < PATCH_SIZE:
-                    pad_bottom = PATCH_SIZE - h_tile
-                    pad_right = PATCH_SIZE - w_tile
-                    img = np.pad(img, ((0, 0), (0, pad_bottom), (0, pad_right)), mode="edge")
+                window = Window(x1, y1, dx, dy)
+                img = src.read(list(range(2, 2 + INPUT_CHANNELS)), window=window).astype(np.float32)
+
+                if img.shape[1] == 0 or img.shape[2] == 0:
+                    continue
+
+                pad_bottom = PATCH_SIZE - dy
+                pad_right = PATCH_SIZE - dx
+                img = np.pad(img, ((0, 0), (0, pad_bottom), (0, pad_right)), mode='edge')
 
                 img_tensor = torch.from_numpy(img).unsqueeze(0).cuda()
                 with torch.no_grad():
-                    logits = model(img_tensor).squeeze(0).cpu()
-                    probs = torch.nn.functional.softmax(logits, dim=0).numpy()
+                    logits = model(img_tensor).squeeze(0).cpu().numpy()
 
-                y1 = min(y + PATCH_SIZE, h)
-                x1 = min(x + PATCH_SIZE, w)
-                dy, dx = y1 - y, x1 - x
-
-                pred_accum[:, y:y1, x:x1] += probs[:, :dy, :dx] * gauss_mask[:dy, :dx]
-                weight_map[y:y1, x:x1] += gauss_mask[:dy, :dx]
+                logit_accum[:, y1:y2, x1:x2] += logits[:, :dy, :dx]
+                weight_map[y1:y2, x1:x2] += 1.0
 
         weight_map = np.clip(weight_map, 1e-6, None)
-        avg_probs = pred_accum / weight_map
+        avg_logits = logit_accum / weight_map
+        avg_probs = softmax(avg_logits, axis=0)
         pred = np.argmax(avg_probs, axis=0).astype(np.uint8)
-
-        decoded = pred
-        decoded = np.clip(decoded, 0, 255).astype(np.uint8)
+        decoded = np.clip(pred, 0, 255).astype(np.uint8)
+        decoded[weight_map == 1e-6] = 255
 
         if label_names:
-            class_descriptions = [label_names.get(str(c), f"Class {c}") for c in range(NUM_CLASSES)]
-            meta["descriptions"] = tuple(class_descriptions)
+            meta["descriptions"] = tuple(label_names.get(str(c), f"Class {c}") for c in range(NUM_CLASSES))
 
         with rasterio.open(output_tif, 'w', **meta) as dst:
             dst.write(decoded, 1)
-
-
 
 # ========== Main ==========
 if __name__ == "__main__":
