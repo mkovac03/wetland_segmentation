@@ -97,9 +97,10 @@ color_table = [
 
 qml_lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    '<qgis>',
-    '  <renderer-v2 type="paletted" forcerasterrenderer="0" band="1">',
-    '    <paletteEntries>'
+    '<qgis styleCategories="AllStyleCategories" version="3.22">',
+    '  <renderer-v2 type="singlebandpseudocolor" forceraster="0" band="1" classificationMin="0" classificationMax="13" opacity="1">',
+    '    <rastershader>',
+    '      <colorrampshader colorRampType="DISCRETE">'
 ]
 
 for i, (class_id, name) in enumerate(sorted((int(k), v) for k, v in label_names.items())):
@@ -111,8 +112,10 @@ for i, (class_id, name) in enumerate(sorted((int(k), v) for k, v in label_names.
     )
 
 qml_lines += [
-    '    </paletteEntries>',
+    '      </colorrampshader>',
+    '    </rastershader>',
     '  </renderer-v2>',
+    '  <layerTransparency/>',
     '</qgis>'
 ]
 

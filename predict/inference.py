@@ -158,11 +158,11 @@ def run_inference(model, input_tif, output_tif):
         avg_probs = pred_accum / weight_map
         pred = np.argmax(avg_probs, axis=0).astype(np.uint8)
 
-        decoded = np.vectorize(lambda x: inverse_remap.get(x, 255))(pred)
+        decoded = pred
         decoded = np.clip(decoded, 0, 255).astype(np.uint8)
 
         if label_names:
-            class_descriptions = [label_names.get(str(inverse_remap.get(c, 255)), f"Class {c}") for c in range(NUM_CLASSES)]
+            class_descriptions = [label_names.get(str(c), f"Class {c}") for c in range(NUM_CLASSES)]
             meta["descriptions"] = tuple(class_descriptions)
 
         with rasterio.open(output_tif, 'w', **meta) as dst:
