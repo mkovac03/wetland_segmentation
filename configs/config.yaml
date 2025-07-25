@@ -1,16 +1,16 @@
 # File: configs/config.yaml
 
-input_dir: "/media/lkm413/storage1/gee_embedding_download/images/Denmark/2018/29b/"
+input_dir: "/media/lkm413/storage2/gee_embedding_download/images/Europe/2018/bands_01_22"
 processed_dir: "data/processed/{now}"
 splits_path: "data/splits/splits_{now}.json"
 output_dir: "outputs/{now}"
-crs_target: "EPSG:32632"
+crs_target: "EPSG:3035"
 
 patch_size: 512
 stride: 256
-batch_size: 4
+batch_size: 32
 num_classes: 14
-input_channels: 29
+input_channels: 22
 
 model:
   encoder: resnet34
@@ -38,3 +38,10 @@ loss:
     beta: 0.8
 
 gradient_clipping: 1.0
+
+splitting:
+  background_threshold: 0.9   # Max allowed background ratio per tile
+  testval_ratio: 0.15         # Proportion of data to split into val+test
+  val_ratio_within_testval: 0.5  # From testval pool, how much for validation
+  seed: 42
+

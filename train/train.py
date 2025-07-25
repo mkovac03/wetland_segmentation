@@ -21,8 +21,10 @@ from data.transform import RandomAugment
 from models.resunet_vit import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
 from losses.focal_tversky import CombinedFocalTverskyLoss
+from multiprocessing import Pool, cpu_count
 
 import argparse
+import gc
 
 torch.backends.cudnn.benchmark = True
 
@@ -53,29 +55,61 @@ if len(train_ds) == 0 or len(val_ds) == 0:
 # ========= Class weights and sample weights =========
 n_classes = config["num_classes"]
 print("→ Calculating pixel-wise class distribution for weighting...")
-label_counts = np.zeros(n_classes, dtype=np.int64)
-for i in tqdm(range(len(train_ds)), desc="Scanning training labels"):
-    _, label = train_ds[i]
-    label = label.numpy().flatten()
-    label = label[label != 255]
-    label_counts += np.bincount(label, minlength=n_classes)
 
-class_weights = 1.0 / (label_counts + 1e-6)
-class_weights = class_weights * (n_classes / class_weights.sum())
+weights_path = config["splits_path"].replace("splits_", "weights_").replace(".json", ".npz")
+weights_path = weights_path.replace("data/splits", os.path.join(config["processed_dir"]))
+os.makedirs(os.path.dirname(weights_path), exist_ok=True)
 
-sample_weights = []
-for i in range(len(train_ds)):
-    _, label = train_ds[i]
-    label = label.numpy().flatten()
-    label = label[label != 255]
-    sample_weights.append(class_weights[label].mean() if len(label) > 0 else 0.0)
+if os.path.exists(weights_path):
+    print(f"[INFO] Loading class/sample weights from: {weights_path}")
+    data = np.load(weights_path)
+    class_weights = data["class_weights"]
+    sample_weights = data["sample_weights"]
+else:
+    pixel_path = weights_path.replace(".npz", "_pixels.npy")
+    if os.path.exists(pixel_path):
+        pixel_counts = np.load(pixel_path, allow_pickle=True)
+        print(f"[INFO] Loaded pixel counts from: {pixel_path}")
+    else:
+        print("→ Preloading labels with multiprocessing:")
+        from multiprocessing import Pool
+        def preload(idx):
+            _, label = train_ds[idx]
+            label = label.numpy().flatten()
+            label = label[label != 255]
+            return np.bincount(label, minlength=n_classes)
+
+        with Pool(processes=8) as pool:
+            pixel_counts = list(tqdm(pool.imap(preload, range(len(train_ds))), total=len(train_ds)))
+        np.save(pixel_path, pixel_counts)
+        print(f"[INFO] Saved pixel counts to: {pixel_path}")
+
+    label_counts = np.sum(pixel_counts, axis=0)
+    class_weights = 1.0 / (label_counts + 1e-6)
+    class_weights = class_weights * (n_classes / class_weights.sum())
+
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    print("→ Computing sample weights with multiprocessing:")
+    def sample_weight(idx):
+        _, label = train_ds[idx]
+        label = label.numpy().flatten()
+        label = label[label != 255]
+        return np.mean(class_weights[label]) if len(label) > 0 else 0.0
+
+    with Pool(processes=8) as pool:
+        sample_weights = list(tqdm(pool.imap(sample_weight, range(len(train_ds))), total=len(train_ds)))
+
+    np.savez(weights_path, class_weights=class_weights, sample_weights=sample_weights)
+    print(f"[INFO] Saved class/sample weights to: {weights_path}")
 
 sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
 
 # ========= Dataloaders =========
 train_loader = DataLoader(train_ds, batch_size=config["batch_size"], sampler=sampler,
-                          num_workers=4, pin_memory=True)
-val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
+                          num_workers=8, pin_memory=True)
+val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)
 
 # ========= Model =========
 model = ResNetUNetViT(config).cuda()
@@ -112,7 +146,6 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     factor=config.get("scheduler",{}).get("factor",0.5),
     patience=config.get("scheduler",{}).get("patience",5)
 )
-
 
 # ========= Logging =========
 os.makedirs(config["output_dir"], exist_ok=True)
@@ -203,6 +236,12 @@ for epoch in range(config["training"]["epochs"]):
         if preds:
             img = create_image_grid(torch.cat(lbls), torch.cat(preds), num_classes=config["num_classes"])
             writer.add_image("Samples/GT_vs_Pred", to_tensor(img), epoch)
+
+    # Clear cache after epoch 1
+    if epoch == 0:
+        torch.cuda.empty_cache()
+        gc.collect()
+        print("[INFO] Cleared CUDA and CPU cache after epoch 1")
 
     # ========= Early Stopping =========
     curr_metric = avg_loss if es_metric == "loss" else f1
