@@ -1,2 +1,4 @@
 __pycache__/\n*.pyc\ndata/\noutputs/\n.vscode/\n.DS_Store
 data/processed*/
+data/processed/
+outputs/
