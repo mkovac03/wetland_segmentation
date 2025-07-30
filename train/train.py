@@ -104,7 +104,9 @@ else:
     np.savez(weights_path, class_weights=class_weights, sample_weights=sample_weights)
     print(f"[INFO] Saved class/sample weights to: {weights_path}")
 
-sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+assert len(sample_weights) == len(train_ds.file_list), "Mismatch between weights and dataset entries"
+sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_ds.file_list), replacement=True)
+
 
 # ========= Dataloaders =========
 train_loader = DataLoader(train_ds, batch_size=config["batch_size"], sampler=sampler,

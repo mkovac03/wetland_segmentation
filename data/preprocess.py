@@ -35,21 +35,19 @@ merge_map = {
     3: [8],
     4: [9],
     5: [10],
-    6: [11],
-    7: [12],
-    8: [13],
-    9: [14],
-    10: [15],
-    11: [16, 17, 20, 21, 22],
-    12: [18],
-    13: [19]
+    6: [12],
+    7: [11, 13],
+    8: [14],
+    9: [15],
+    10: [16, 17, 20, 21, 22],
+    11: [18],
+    12: [19]
 }
 remap_dict = {old: new for new, olds in merge_map.items() for old in olds}
 label_names = {
     0: "No Wetland", 1: "Rice Fields", 2: "Riparian, fluvial and swamp forest",
-    3: "Managed or grazed meadow", 4: "Wet grasslands", 5: "Wet heaths",
-    6: "Fen scrubs", 7: "Beaches", 8: "Inland marshes", 9: "Open mires",
-    10: "Salt marshes", 11: "Surface water", 12: "Saltpans", 13: "Intertidal flats"
+    3: "Managed or grazed meadow", 4: "Wet grasslands", 5: "Wet heaths", 6: "Beaches", 7: "Inland marshes", 8: "Open mires",
+    9: "Salt marshes", 10: "Surface water", 11: "Saltpans", 12: "Intertidal flats"
 }
 ignore_val = 255
 nodata_val = -32768
