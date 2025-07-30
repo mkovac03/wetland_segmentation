@@ -2,3 +2,16 @@ __pycache__/\n*.pyc\ndata/\noutputs/\n.vscode/\n.DS_Store
 data/processed*/
 data/processed/
 outputs/
+data/splits/
+__pycache__/
+**/__pycache__/
+data/processed/
+data/splits/
+outputs/
+__pycache__/
+**/__pycache__/
+data/processed/
+data/splits/
+outputs/
+__pycache__/
+**/__pycache__/
