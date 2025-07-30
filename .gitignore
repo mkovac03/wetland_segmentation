@@ -16,3 +16,4 @@ outputs/
 __pycache__/
 **/__pycache__/
 models/sam_hq_vit_h.pth
+models/sam_hq_vit_h.pth
