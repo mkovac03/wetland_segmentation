@@ -22,9 +22,9 @@ from models.resunet_vit import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
 from losses.focal_tversky import CombinedFocalTverskyLoss
 from multiprocessing import Pool, cpu_count
-
 import argparse
 import gc
+import datetime
 
 torch.backends.cudnn.benchmark = True
 
@@ -34,6 +34,7 @@ print("CUDA available:", torch.cuda.is_available())
 # ========= Load config =========
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="configs/config.yaml")
+parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
 args = parser.parse_args()
 
 with open(args.config, "r") as f:
@@ -72,7 +73,6 @@ else:
         print(f"[INFO] Loaded pixel counts from: {pixel_path}")
     else:
         print("→ Preloading labels with multiprocessing:")
-        from multiprocessing import Pool
         def preload(idx):
             _, label = train_ds[idx]
             label = label.numpy().flatten()
@@ -107,7 +107,6 @@ else:
 assert len(sample_weights) == len(train_ds.file_list), "Mismatch between weights and dataset entries"
 sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_ds.file_list), replacement=True)
 
-
 # ========= Dataloaders =========
 train_loader = DataLoader(train_ds, batch_size=config["batch_size"], sampler=sampler,
                           num_workers=8, pin_memory=True)
@@ -121,7 +120,6 @@ optimizer = optim.AdamW(model.parameters(),
                         lr=config["training"]["lr"],
                         weight_decay=config["training"]["weight_decay"])
 
-# ========= Losses =========
 ft_loss = CombinedFocalTverskyLoss(
     num_classes=config["num_classes"],
     focal_alpha=config["loss"]["focal"]["alpha"],
@@ -134,27 +132,27 @@ ft_loss = CombinedFocalTverskyLoss(
 ce_weight = torch.tensor(class_weights, dtype=torch.float32).cuda()
 ce_loss   = nn.CrossEntropyLoss(weight=ce_weight, ignore_index=255)
 
-scaler = GradScaler(enabled=config["training"]["use_amp"])
+scaler = GradScaler(enabled=config["training"].get("use_amp", True))
 
-# ========= Scheduler & Early Stopping =========
 es_metric = config["training"]["early_stopping_metric"].lower()
 best_metric = float("inf") if es_metric == "loss" else -1
 patience = config["training"]["early_stopping_patience"]
 no_improve = 0
 
+scheduler_cfg = config.get("scheduler", {})
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
     mode="min" if es_metric=="loss" else "max",
-    factor=config.get("scheduler",{}).get("factor",0.5),
-    patience=config.get("scheduler",{}).get("patience",5)
+    factor=scheduler_cfg.get("factor", 0.5),
+    patience=scheduler_cfg.get("patience", 5)
 )
 
-# ========= Logging =========
 os.makedirs(config["output_dir"], exist_ok=True)
 log_file = open(os.path.join(config["output_dir"], "training_log.txt"), "a")
 writer = SummaryWriter(log_dir=config["output_dir"])
 
-# ========= Training Loop =========
+save_every = config.get("save_every", 5)
+
 for epoch in range(config["training"]["epochs"]):
     model.train()
     total_loss = 0.0
@@ -162,7 +160,7 @@ for epoch in range(config["training"]["epochs"]):
     for x, y in tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['training']['epochs']}"):
         x, y = x.cuda(), y.cuda()
         optimizer.zero_grad()
-        with autocast(device_type='cuda', enabled=config["training"]["use_amp"]):
+        with autocast(device_type='cuda', enabled=config["training"].get("use_amp", True)):
             out = model(x)
             loss = ft_loss(out, y) + ce_loss(out, y)
 
@@ -202,50 +200,13 @@ for epoch in range(config["training"]["epochs"]):
     writer.add_scalar("F1/val", f1, epoch)
     writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
 
-    # ========= Visualization (every 5 epochs) =========
-    if epoch % 5 == 0:
-        def create_image_grid(gt_tensor, pred_tensor, max_samples=5, num_classes=20):
-            fig, axes = plt.subplots(max_samples, 2, figsize=(6, 2 * max_samples))
-            cmap = plt.get_cmap("tab20", num_classes)
-            for i in range(max_samples):
-                gt_img = gt_tensor[i].squeeze().numpy()
-                pred_img = pred_tensor[i].squeeze().numpy()
-                axes[i, 0].imshow(gt_img, cmap=cmap, vmin=0, vmax=num_classes - 1)
-                axes[i, 0].set_title("Ground Truth")
-                axes[i, 0].axis("off")
-                axes[i, 1].imshow(pred_img, cmap=cmap, vmin=0, vmax=num_classes - 1)
-                axes[i, 1].set_title("Prediction")
-                axes[i, 1].axis("off")
-            fig.tight_layout()
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png')
-            plt.close(fig)
-            buf.seek(0)
-            return Image.open(buf)
+    if epoch % save_every == 0:
+        torch.save(model.state_dict(), os.path.join(config["output_dir"], f"model_epoch{epoch+1}.pt"))
 
-        val_iter = iter(val_loader)
-        lbls, preds = [], []
-        with torch.no_grad():
-            for _ in range(min(5, len(val_loader))):
-                try:
-                    x, y = next(val_iter)
-                    x, y = x.cuda(), y.cuda()
-                    pred = model(x).argmax(1)
-                    lbls.append(y.cpu())
-                    preds.append(pred.cpu())
-                except StopIteration:
-                    break
-        if preds:
-            img = create_image_grid(torch.cat(lbls), torch.cat(preds), num_classes=config["num_classes"])
-            writer.add_image("Samples/GT_vs_Pred", to_tensor(img), epoch)
-
-    # Clear cache after epoch 1
     if epoch == 0:
         torch.cuda.empty_cache()
         gc.collect()
-        print("[INFO] Cleared CUDA and CPU cache after epoch 1")
 
-    # ========= Early Stopping =========
     curr_metric = avg_loss if es_metric == "loss" else f1
     improved = curr_metric < best_metric if es_metric == "loss" else curr_metric > best_metric
 

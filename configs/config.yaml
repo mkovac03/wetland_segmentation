@@ -7,9 +7,9 @@ output_dir: "outputs/{now}"
 crs_target: "EPSG:3035"
 
 patch_size: 512
-stride: 256
-batch_size: 16
-num_classes: 14
+stride: 512
+batch_size: 8
+num_classes: 13
 input_channels: 22
 
 model:
@@ -27,6 +27,9 @@ training:
   use_amp: true
   early_stopping_metric: loss  # or "f1"
   early_stopping_patience: 30
+  deterministic: false
+  scheduler: reduce_on_plateau
+  scheduler_patience: 10
 
 loss:
   focal:
@@ -41,7 +44,15 @@ gradient_clipping: 1.0
 
 splitting:
   background_threshold: 0.9   # Max allowed background ratio per tile
-  testval_ratio: 0.75         # Proportion of data to split into val+test
+  testval_ratio: 0.2         # Proportion of data to split into val+test
   val_ratio_within_testval: 0.5  # From testval pool, how much for validation
   seed: 42
 
+logging:
+  checkpoint_interval: 5
+  eval_interval: 1
+  save_best_only: true
+  resume_from_checkpoint: null
+
+debug:
+  monitor_memory: true

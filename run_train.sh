@@ -20,13 +20,16 @@ sed "s|{now}|$NOW|g" "$CONFIG_SRC" > "$CONFIG_EXPANDED"
 
 # Check if preprocessing already done
 PROCESSED_DIR="data/processed/$NOW"
-if compgen -G "$PROCESSED_DIR/*.npy" > /dev/null; then
-  echo "Preprocessing already done for $NOW ($(find "$PROCESSED_DIR" -type f -name '*.npy' | wc -l) files). Skipping..."
+INPUT_DIR=$(grep '^input_dir:' "$CONFIG_EXPANDED" | sed 's/input_dir:[ ]*//' | sed 's/"//g')
+EXPECTED=$(find "$INPUT_DIR" -name '*.tif' | wc -l)
+DONE=$(find "$PROCESSED_DIR" -type f -name '*_img.npy' | wc -l)
+
+if [[ "$DONE" -ge "$EXPECTED" ]]; then
+  echo "Preprocessing already complete for $NOW ($DONE / $EXPECTED tiles). Skipping..."
 else
-  echo "Running preprocessing..."
+  echo "Running preprocessing ($DONE / $EXPECTED done)..."
   python data/preprocess.py --config "$CONFIG_EXPANDED"
 fi
-
 
 # Check if splits exist
 SPLIT_FILE="data/splits/splits_${NOW}.json"
