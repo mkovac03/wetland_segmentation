@@ -43,10 +43,12 @@ loss:
 gradient_clipping: 1.0
 
 splitting:
-  background_threshold: 0.9   # Max allowed background ratio per tile
-  testval_ratio: 0.2         # Proportion of data to split into val+test
-  val_ratio_within_testval: 0.5  # From testval pool, how much for validation
+  background_threshold: 0.9
+  train_ratio: 0.05      # ← NEW: 5% for training
+  val_ratio: 0.1
+  test_ratio: 0.1
   seed: 42
+
 
 logging:
   checkpoint_interval: 5

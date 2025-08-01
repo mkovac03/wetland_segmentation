@@ -4,8 +4,10 @@ import yaml
 import argparse
 import numpy as np
 from tqdm import tqdm
-from data.dataset import get_file_list
+from data.dataset import get_file_list, GoogleEmbedDataset
 from iterstrat.ml_stratifiers import MultilabelStratifiedShuffleSplit
+from sklearn.utils import shuffle
+import torch
 
 # ========== Argument parsing ==========
 parser = argparse.ArgumentParser()
@@ -16,7 +18,7 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     config = yaml.safe_load(f)
 
-INPUT_DIR  = config["processed_dir"].rstrip("/")
+INPUT_DIR = config["processed_dir"].rstrip("/")
 SPLIT_PATH = config["splits_path"]
 NUM_CLASSES = config["num_classes"]
 
@@ -25,9 +27,10 @@ split_cfg = config.get("splitting", {})
 BACKGROUND_CLASS = 0
 IGNORE_INDEX = 255
 BG_THRESHOLD = split_cfg.get("background_threshold", 0.7)
-TESTVAL_RATIO = split_cfg.get("testval_ratio", 0.15)
-VAL_RATIO_WITHIN_TESTVAL = split_cfg.get("val_ratio_within_testval", 0.5)
 SEED = split_cfg.get("seed", 42)
+TRAIN_RATIO = split_cfg.get("train_ratio", 0.8)
+VAL_RATIO = split_cfg.get("val_ratio", 0.1)
+TEST_RATIO = split_cfg.get("test_ratio", 0.1)
 
 # ========== Get file list ==========
 file_list = get_file_list(INPUT_DIR)
@@ -63,26 +66,54 @@ if len(X) == 0:
 X = np.array(X)
 Y = np.stack(Y)
 
-# ========== Stratified Split ==========
-msss = MultilabelStratifiedShuffleSplit(n_splits=1, test_size=TESTVAL_RATIO, random_state=SEED)
-train_idx, testval_idx = next(msss.split(X, Y))
+# ========== Limit total set based on train+val+test ratios ==========
+total_ratio = TRAIN_RATIO + VAL_RATIO + TEST_RATIO
+if total_ratio < 1.0:
+    n_total = int(len(X) * total_ratio)
+    X, Y = shuffle(X, Y, random_state=SEED)
+    X = X[:n_total]
+    Y = Y[:n_total]
+    print(f"[INFO] Subsampled {n_total} tiles based on total ratio {total_ratio:.2f}")
 
-X_testval = X[testval_idx]
-Y_testval = Y[testval_idx]
+# ========== Multilabel stratified splitting ==========
+testval_ratio = VAL_RATIO + TEST_RATIO
+val_ratio_within_temp = VAL_RATIO / (VAL_RATIO + TEST_RATIO)
 
-msss2 = MultilabelStratifiedShuffleSplit(n_splits=1, test_size=VAL_RATIO_WITHIN_TESTVAL, random_state=SEED)
-val_idx, test_idx = next(msss2.split(X_testval, Y_testval))
+msss = MultilabelStratifiedShuffleSplit(n_splits=1, test_size=testval_ratio, random_state=SEED)
+train_idx, temp_idx = next(msss.split(X, Y))
+
+X_temp = X[temp_idx]
+Y_temp = Y[temp_idx]
+
+msss2 = MultilabelStratifiedShuffleSplit(n_splits=1, test_size=1 - val_ratio_within_temp, random_state=SEED)
+val_idx, test_idx = next(msss2.split(X_temp, Y_temp))
 
 splits = {
     "train": X[train_idx].tolist(),
-    "val": X_testval[val_idx].tolist(),
-    "test": X_testval[test_idx].tolist(),
+    "val": X_temp[val_idx].tolist(),
+    "test": X_temp[test_idx].tolist(),
 }
 
-# ========== Save ==========
+# ========== Save splits ==========
 os.makedirs(os.path.dirname(SPLIT_PATH), exist_ok=True)
 with open(SPLIT_PATH, 'w') as f:
     json.dump(splits, f, indent=2)
 
 print(f"[INFO] Saved splits to {SPLIT_PATH}")
 print(f"[INFO] Train: {len(splits['train'])}, Val: {len(splits['val'])}, Test: {len(splits['test'])}, Total (after filtering): {len(X)}")
+
+# ========== Pixel-wise class frequency computation ==========
+print("[INFO] Calculating pixel-wise class distribution for weighting...")
+train_ds = GoogleEmbedDataset(splits["train"], check_files=True)
+pixel_counts = np.zeros(NUM_CLASSES, dtype=np.int64)
+
+for i in tqdm(range(len(train_ds)), desc="Counting pixels"):
+    _, lbl = train_ds[i]
+    for c in range(NUM_CLASSES):
+        pixel_counts[c] += torch.sum(lbl == c).item()
+
+timestamp = os.path.basename(INPUT_DIR)
+pixel_path = os.path.join(INPUT_DIR, f"weights_{timestamp}_pixels.npy")
+os.makedirs(os.path.dirname(pixel_path), exist_ok=True)
+np.save(pixel_path, pixel_counts)
+print(f"[INFO] Saved pixel counts to {pixel_path}")

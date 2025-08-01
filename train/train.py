@@ -21,7 +21,6 @@ from data.transform import RandomAugment
 from models.resunet_vit import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
 from losses.focal_tversky import CombinedFocalTverskyLoss
-from multiprocessing import Pool, cpu_count
 import argparse
 import gc
 import datetime
@@ -57,8 +56,9 @@ if len(train_ds) == 0 or len(val_ds) == 0:
 n_classes = config["num_classes"]
 print("→ Calculating pixel-wise class distribution for weighting...")
 
-weights_path = config["splits_path"].replace("splits_", "weights_").replace(".json", ".npz")
-weights_path = weights_path.replace("data/splits", os.path.join(config["processed_dir"]))
+timestamp = os.path.basename(config["processed_dir"])
+weights_path = os.path.join(config["processed_dir"], f"weights_{timestamp}.npz")
+pixel_path   = os.path.join(config["processed_dir"], f"weights_{timestamp}_pixels.npy")
 os.makedirs(os.path.dirname(weights_path), exist_ok=True)
 
 if os.path.exists(weights_path):
@@ -66,43 +66,32 @@ if os.path.exists(weights_path):
     data = np.load(weights_path)
     class_weights = data["class_weights"]
     sample_weights = data["sample_weights"]
-else:
-    pixel_path = weights_path.replace(".npz", "_pixels.npy")
-    if os.path.exists(pixel_path):
-        pixel_counts = np.load(pixel_path, allow_pickle=True)
-        print(f"[INFO] Loaded pixel counts from: {pixel_path}")
-    else:
-        print("→ Preloading labels with multiprocessing:")
-        def preload(idx):
-            _, label = train_ds[idx]
-            label = label.numpy().flatten()
-            label = label[label != 255]
-            return np.bincount(label, minlength=n_classes)
 
-        with Pool(processes=8) as pool:
-            pixel_counts = list(tqdm(pool.imap(preload, range(len(train_ds))), total=len(train_ds)))
-        np.save(pixel_path, pixel_counts)
-        print(f"[INFO] Saved pixel counts to: {pixel_path}")
+elif os.path.exists(pixel_path):
+    print(f"[INFO] Loaded pixel counts from: {pixel_path}")
+    pixel_counts = np.load(pixel_path)
 
-    label_counts = np.sum(pixel_counts, axis=0)
+    label_counts = pixel_counts
     class_weights = 1.0 / (label_counts + 1e-6)
     class_weights = class_weights * (n_classes / class_weights.sum())
 
     torch.cuda.empty_cache()
     gc.collect()
 
-    print("→ Computing sample weights with multiprocessing:")
-    def sample_weight(idx):
-        _, label = train_ds[idx]
-        label = label.numpy().flatten()
+    print("→ Computing sample weights with mmap:")
+    sample_weights = []
+    for base in tqdm(splits["train"]):
+        lbl_path = base + "_lbl.npy"
+        label = np.load(lbl_path, mmap_mode="r").flatten()
         label = label[label != 255]
-        return np.mean(class_weights[label]) if len(label) > 0 else 0.0
-
-    with Pool(processes=8) as pool:
-        sample_weights = list(tqdm(pool.imap(sample_weight, range(len(train_ds))), total=len(train_ds)))
+        weight = np.mean(class_weights[label]) if len(label) > 0 else 0.0
+        sample_weights.append(weight)
 
     np.savez(weights_path, class_weights=class_weights, sample_weights=sample_weights)
     print(f"[INFO] Saved class/sample weights to: {weights_path}")
+
+else:
+    raise FileNotFoundError(f"Pixel count file not found: {pixel_path}. Please run split_data.py again.")
 
 assert len(sample_weights) == len(train_ds.file_list), "Mismatch between weights and dataset entries"
 sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_ds.file_list), replacement=True)

@@ -1,4 +1,3 @@
-# File: data/preprocess_parallel.py
 import os
 import glob
 import rasterio
@@ -110,6 +109,9 @@ def process_file(args):
                 background_label = remap_dict.get(0)
                 if background_label is not None:
                     if (np.sum(label == background_label) / label.size) > 0.95:
+                        # Save placeholder .npy files to mark as processed
+                        np.save(img_out, np.zeros((input_channels, 512, 512), dtype=np.float32))
+                        np.save(lbl_out, np.full((512, 512), ignore_val, dtype=np.uint8))
                         return None
 
                 image = np.stack(reproj_arrays[1:1 + input_channels]).astype(np.float32)
@@ -140,20 +142,57 @@ if __name__ == "__main__":
         config = yaml.safe_load(f)
 
     os.makedirs(config["processed_dir"], exist_ok=True)
-    input_files = sorted(glob.glob(os.path.join(config["input_dir"], "*.tif")))
+    input_dir = config["input_dir"]
+    processed_dir = config["processed_dir"]
 
-    processed_img_files = glob.glob(os.path.join(config["processed_dir"], "*_img.npy"))
-    resume_index = len(processed_img_files)
+    input_files = sorted(glob.glob(os.path.join(input_dir, "*.tif")))
 
-    if resume_index >= len(input_files):
-        print("[INFO] All files already processed. Skipping preprocessing.")
-        input_files = []
+    def validate_tile(tif_path):
+        try:
+            base = os.path.splitext(os.path.basename(tif_path))[0]
+            img_path = os.path.join(processed_dir, f"{base}_img.npy")
+            lbl_path = os.path.join(processed_dir, f"{base}_lbl.npy")
+
+            if not os.path.exists(img_path) or not os.path.exists(lbl_path):
+                return tif_path
+
+            if os.path.getsize(img_path) == 0 or os.path.getsize(lbl_path) == 0:
+                return tif_path
+
+            return None
+        except Exception as e:
+            return f"[CRASH] {tif_path}: {str(e)}"
+
+    print("[INFO] Scanning input files for missing or corrupt .npy outputs...")
+
+    # Conservative pool size to avoid overloading system memory
+    with Pool(min(cpu_count() // 2, 4)) as pool:
+        results = list(
+            tqdm(pool.imap_unordered(validate_tile, input_files, chunksize=100),
+                 total=len(input_files), desc="Validating tiles")
+        )
+
+    missing_or_corrupt = [r for r in results if isinstance(r, str) and r.endswith(".tif")]
+
+    crashes = [r for r in results if isinstance(r, str) and not r.endswith(".tif")]
+    if crashes:
+        print("\n[WARNING] Some tiles caused crashes during validation:")
+        for line in crashes[:10]:  # Limit display
+            print(line)
+        if len(crashes) > 10:
+            print(f"... {len(crashes) - 10} more crash entries omitted")
+
+    print(f"\n[INFO] Total input .tif tiles:    {len(input_files)}")
+    print(f"[INFO] Already processed OK:      {len(input_files) - len(missing_or_corrupt)}")
+    print(f"[INFO] Missing or broken tiles:   {len(missing_or_corrupt)}\n")
+
+    if len(missing_or_corrupt) == 0:
+        print("[INFO] All tiles already processed. Nothing to do.")
     else:
-        print(f"[INFO] Resuming from index {resume_index}/{len(input_files)}")
-        input_files = input_files[resume_index:]
-
-    if input_files:
-        with Pool(max(cpu_count() - 1, 1)) as pool:
-            for res in tqdm(pool.imap_unordered(process_file, [(f, config) for f in input_files]), total=len(input_files)):
+        print("[INFO] Starting processing of missing or invalid tiles...")
+        with Pool(min(cpu_count() // 2, 4)) as pool:
+            for res in tqdm(pool.imap_unordered(process_file, [(f, config) for f in missing_or_corrupt]),
+                            total=len(missing_or_corrupt)):
                 if res:
                     print(res)
+
