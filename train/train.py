@@ -83,7 +83,7 @@ elif os.path.exists(pixel_path):
     for base in tqdm(splits["train"]):
         lbl_path = base + "_lbl.npy"
         label = np.load(lbl_path, mmap_mode="r").flatten()
-        label = label[label != 255]
+        label = label[(label != 255) & (label < len(class_weights))]
         weight = np.mean(class_weights[label]) if len(label) > 0 else 0.0
         sample_weights.append(weight)
 
