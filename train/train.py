@@ -15,6 +15,7 @@ from tqdm import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_tensor
+import hashlib
 
 from data.dataset import GoogleEmbedDataset
 from data.transform import RandomAugment
@@ -24,6 +25,8 @@ from losses.focal_tversky import CombinedFocalTverskyLoss
 import argparse
 import gc
 import datetime
+
+from split_data import generate_splits_and_weights
 
 torch.backends.cudnn.benchmark = True
 
@@ -39,7 +42,26 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     config = yaml.safe_load(f)
 
+def get_split_hash(cfg):
+    split_cfg = cfg["splitting"]
+    hash_input = json.dumps({
+        "train_ratio": split_cfg.get("train_ratio", 0.8),
+        "val_ratio": split_cfg.get("val_ratio", 0.1),
+        "test_ratio": split_cfg.get("test_ratio", 0.1),
+        "background_threshold": split_cfg.get("background_threshold", 0.9),
+        "seed": split_cfg.get("seed", 42),
+        "num_classes": cfg["num_classes"]
+    }, sort_keys=True)
+    return hashlib.md5(hash_input.encode()).hexdigest()[:8]
+
 # ========= Load splits =========
+split_hash = get_split_hash(config)
+timestamp = os.path.basename(config["processed_dir"])
+config["splits_path"] = f"data/splits/splits_{timestamp}_{split_hash}.json"
+
+if not os.path.exists(config["splits_path"]):
+    generate_splits_and_weights(config)
+
 with open(config["splits_path"], "r") as f:
     splits = json.load(f)
 
@@ -56,9 +78,8 @@ if len(train_ds) == 0 or len(val_ds) == 0:
 n_classes = config["num_classes"]
 print("→ Calculating pixel-wise class distribution for weighting...")
 
-timestamp = os.path.basename(config["processed_dir"])
-weights_path = os.path.join(config["processed_dir"], f"weights_{timestamp}.npz")
-pixel_path   = os.path.join(config["processed_dir"], f"weights_{timestamp}_pixels.npy")
+weights_path = os.path.join(config["processed_dir"], f"weights_{timestamp}_{split_hash}.npz")
+pixel_path   = os.path.join(config["processed_dir"], f"weights_{timestamp}_{split_hash}_pixels.npy")
 os.makedirs(os.path.dirname(weights_path), exist_ok=True)
 
 if os.path.exists(weights_path):
@@ -91,7 +112,8 @@ elif os.path.exists(pixel_path):
     print(f"[INFO] Saved class/sample weights to: {weights_path}")
 
 else:
-    raise FileNotFoundError(f"Pixel count file not found: {pixel_path}. Please run split_data.py again.")
+    generate_splits_and_weights(config)
+    raise RuntimeError("Re-ran split_data but pixel count file was missing. Please check preprocessing output.")
 
 assert len(sample_weights) == len(train_ds.file_list), "Mismatch between weights and dataset entries"
 sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_ds.file_list), replacement=True)
@@ -101,14 +123,13 @@ train_loader = DataLoader(train_ds, batch_size=config["batch_size"], sampler=sam
                           num_workers=8, pin_memory=True, prefetch_factor=4, persistent_workers=True)
 val_loader = DataLoader(
     val_ds,
-    batch_size=8,             # ✅ increase to match training
+    batch_size=config["batch_size"],  # unified
     shuffle=False,
     num_workers=4,
     pin_memory=True,
     prefetch_factor=4,
     persistent_workers=True
 )
-
 
 # ========= Model =========
 model = ResNetUNetViT(config).cuda()
@@ -201,6 +222,45 @@ for epoch in range(config["training"]["epochs"]):
     writer.add_scalar("mIoU/val", miou, epoch)
     writer.add_scalar("F1/val", f1, epoch)
     writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
+
+    # ===== Visual Logging to TensorBoard =====
+    if (epoch + 1) % save_every == 0:
+        model.eval()
+        try:
+            sample_x, sample_y = val_ds[0]
+            sample_x_vis = sample_x.clone()
+            sample_x = sample_x.unsqueeze(0).cuda()
+            with torch.no_grad():
+                pred = model(sample_x).argmax(1).squeeze().cpu()
+
+            # Normalize input for visualization (use first 3 channels)
+            vis_img = sample_x_vis[0:3]  # take first 3 channels for RGB-like view
+            vis_img = (vis_img - vis_img.min()) / (vis_img.max() - vis_img.min())
+            vis_img = vis_img.permute(1, 2, 0).numpy()  # HWC for imshow
+
+            fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+            axs[0].imshow(vis_img)
+            axs[0].set_title("Input (3 Bands)")
+            axs[1].imshow(sample_y, cmap="tab20")
+            axs[1].set_title("Ground Truth")
+            axs[2].imshow(pred, cmap="tab20")
+            axs[2].set_title("Prediction")
+
+            for ax in axs:
+                ax.axis("off")
+            plt.tight_layout()
+
+            # Convert matplotlib figure to TensorBoard image
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png")
+            buf.seek(0)
+            img = Image.open(buf)
+            img_tensor = to_tensor(img)
+            writer.add_image("Validation/Pred_vs_GT", img_tensor, global_step=epoch)
+            plt.close(fig)
+
+        except Exception as e:
+            print(f"[WARN] TensorBoard image logging failed: {e}")
 
     if epoch % save_every == 0:
         torch.save(model.state_dict(), os.path.join(config["output_dir"], f"model_epoch{epoch+1}.pt"))
