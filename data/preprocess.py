@@ -123,6 +123,7 @@ def process_file(args):
 
                 mask = label != ignore_val
                 image = image * mask[None, :, :]
+                image[:, ~mask] = 0  # Ensures background pixels are fully zero
 
                 np.save(img_out, image)
                 np.save(lbl_out, label)
