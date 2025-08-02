@@ -137,8 +137,33 @@ def run_inference(model, input_tif, output_tif):
                 img = np.pad(img, ((0, 0), (0, pad_bottom), (0, pad_right)), mode='edge')
 
                 img_tensor = torch.from_numpy(img).unsqueeze(0).cuda()
-                with torch.no_grad():
-                    logits = model(img_tensor).squeeze(0).cpu().numpy()
+
+                def apply_tta(model, img_tensor):
+                    variants = [img_tensor,
+                                torch.flip(img_tensor, dims=[3]),  # H-flip
+                                torch.flip(img_tensor, dims=[2]),  # V-flip
+                                torch.flip(img_tensor, dims=[2, 3])]  # HV-flip
+
+                    logits_sum = 0
+                    for variant in variants:
+                        with torch.no_grad():
+                            out = model(variant)
+                        # Unflip to original orientation
+                        if variant is not img_tensor:
+                            if variant.shape != img_tensor.shape:
+                                raise RuntimeError("TTA dimension mismatch")
+                            if torch.equal(variant, torch.flip(img_tensor, dims=[3])):
+                                out = torch.flip(out, dims=[3])
+                            elif torch.equal(variant, torch.flip(img_tensor, dims=[2])):
+                                out = torch.flip(out, dims=[2])
+                            else:
+                                out = torch.flip(out, dims=[2, 3])
+                        logits_sum += out
+
+                    return (logits_sum / len(variants)).squeeze(0).cpu().numpy()
+
+                # Then replace this call:
+                logits = apply_tta(model, img_tensor)
 
                 logit_accum[:, y1:y2, x1:x2] += logits[:, :dy, :dx]
                 weight_map[y1:y2, x1:x2] += 1.0
