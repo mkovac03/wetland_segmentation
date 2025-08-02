@@ -250,7 +250,7 @@ for epoch in range(config["training"]["epochs"]):
     writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
 
     # ===== Visual Logging to TensorBoard =====
-    if (epoch + 1) % save_every == 0:
+    if (epoch + 1) % save_every == 0 or epoch == 0:
         model.eval()
         try:
             sample_x, sample_y = val_ds[0]

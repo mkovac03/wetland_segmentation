@@ -8,7 +8,7 @@ crs_target: "EPSG:3035"
 
 patch_size: 512
 stride: 512
-batch_size: 16
+batch_size: 24
 num_classes: 13
 input_channels: 22
 
