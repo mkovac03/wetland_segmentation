@@ -44,7 +44,7 @@ if [[ -f "$SPLIT_FILE" ]]; then
   echo "✅ Splits file already exists: $SPLIT_FILE. Skipping..."
 else
   echo "📂 Generating splits..."
-  python data/split_data.py --config "$CONFIG_EXPANDED"
+  python split_data.py --config "$CONFIG_EXPANDED"
 fi
 
 # Start training
