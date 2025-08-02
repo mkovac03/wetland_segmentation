@@ -25,8 +25,9 @@ from losses.focal_tversky import CombinedFocalTverskyLoss
 from split_data import generate_splits_and_weights
 import argparse
 import gc
-import datetime
 
+def convert_to_fp16(state_dict):
+    return {k: v.half() if v.dtype == torch.float32 else v for k, v in state_dict.items()}
 
 torch.backends.cudnn.benchmark = True
 
@@ -289,7 +290,8 @@ for epoch in range(config["training"]["epochs"]):
             print(f"[WARN] TensorBoard image logging failed: {e}")
 
     if epoch % save_every == 0:
-        torch.save(model.state_dict(), os.path.join(config["output_dir"], f"model_epoch{epoch+1}.pt"))
+        fp16_weights = convert_to_fp16(model.state_dict())
+        torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_epoch{epoch + 1}_weights.pt"))
 
     if epoch == 0:
         torch.cuda.empty_cache()
@@ -301,8 +303,10 @@ for epoch in range(config["training"]["epochs"]):
     if improved:
         best_metric = curr_metric
         no_improve = 0
-        torch.save(model.state_dict(), os.path.join(config["output_dir"], f"model_ep{epoch+1}.pt"))
-        torch.save(model.state_dict(), os.path.join(config["output_dir"], "best_model.pt"))
+        fp16_weights = convert_to_fp16(model.state_dict())
+        torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_ep{epoch + 1}_weights.pt"))
+        torch.save(fp16_weights, os.path.join(config["output_dir"], "best_model_weights.pt"))
+
         with open(os.path.join(config["output_dir"], "best_epoch.txt"), "w") as f:
             f.write(f"{epoch+1},{f1:.4f}\n")
         print(f"[INFO] New best @ epoch {epoch+1}, F1={f1:.4f}")
