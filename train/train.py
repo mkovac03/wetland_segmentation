@@ -204,7 +204,7 @@ for epoch in range(config["training"]["epochs"]):
             x, y = x.cuda(), y.cuda()
             out = model(x)
             pred = out.argmax(1)
-            all_preds.append(pred.cpu().numpy())
+            all_preds.append(pred.cpu())
             all_labels.append(y.cpu())
             correct += (pred == y).sum().item()
             total += y.numel()
