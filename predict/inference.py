@@ -95,9 +95,11 @@ def parse_best_epoch(log_path, fallback_txt_path=None):
 
 def load_model(ckpt_path):
     model = ResNetUNetViT(config).cuda()
-    model.load_state_dict(torch.load(ckpt_path))
+    state_dict = torch.load(ckpt_path, map_location="cuda")
+    model.load_state_dict(state_dict)
     model.eval()
     return model
+
 
 def run_inference(model, input_tif, output_tif):
     with rasterio.open(input_tif) as src:
@@ -187,17 +189,17 @@ if __name__ == "__main__":
     if best_epoch is None:
         raise RuntimeError("No valid epoch found in training log.")
 
-    ckpt_path = os.path.join(CKPT_DIR, f"model_epoch{best_epoch}.pt")
+    ckpt_path = os.path.join(CKPT_DIR, f"model_epoch{best_epoch}_weights.pt")
     if not os.path.exists(ckpt_path):
-        print(f"[WARNING] model_epoch{best_epoch}.pt not found. Trying best_model.pt...")
-        best_path = os.path.join(CKPT_DIR, "best_model.pt")
+        print(f"[WARNING] model_epoch{best_epoch}_weights.pt not found. Trying best_model_weights.pt...")
+        best_path = os.path.join(CKPT_DIR, "best_model_weights.pt")
         if os.path.exists(best_path):
             ckpt_path = best_path
         else:
-            ckpt_files = glob.glob(os.path.join(CKPT_DIR, "model_epoch*.pt"))
+            cckpt_files = glob.glob(os.path.join(CKPT_DIR, "model_epoch*_weights.pt"))
             if ckpt_files:
                 available_epochs = sorted([
-                    int(re.search(r'model_epoch(\d+)\.pt', os.path.basename(f)).group(1))
+                    int(re.search(r'model_epoch(\d+)_weights\.pt', os.path.basename(f)).group(1))
                     for f in ckpt_files
                 ])
                 fallback_epoch = available_epochs[-1]
