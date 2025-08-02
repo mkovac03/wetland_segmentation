@@ -39,32 +39,46 @@ if len(file_list) == 0:
 
 X, Y = [], []
 
-print("[INFO] Filtering and analyzing label content for each tile...")
-for base in tqdm(file_list):
-    lbl_path = base + "_lbl.npy"
-    lbl = np.load(lbl_path)
+cache_path = os.path.join(INPUT_DIR, f"filtered_tiles_{NUM_CLASSES}_classes.npz")
 
-    total = lbl.size
-    bg_pixels = np.sum(lbl == BACKGROUND_CLASS)
-    ignore_pixels = np.sum(lbl == IGNORE_INDEX)
-    bg_ratio = bg_pixels / (total - ignore_pixels + 1e-6)
+if os.path.exists(cache_path):
+    print(f"[INFO] Loading filtered tiles from cache: {cache_path}")
+    data = np.load(cache_path, allow_pickle=True)
+    X = data["X"]
+    Y = data["Y"]
+else:
+    print("[INFO] Filtering and analyzing label content for each tile...")
+    X, Y = [], []
 
-    if bg_ratio > BG_THRESHOLD:
-        continue
+    for base in tqdm(file_list):
+        lbl_path = base + "_lbl.npy"
+        lbl = np.load(lbl_path)
 
-    class_presence = np.zeros(NUM_CLASSES, dtype=int)
-    for c in range(NUM_CLASSES):
-        if np.any(lbl == c):
-            class_presence[c] = 1
+        total = lbl.size
+        bg_pixels = np.sum(lbl == BACKGROUND_CLASS)
+        ignore_pixels = np.sum(lbl == IGNORE_INDEX)
+        bg_ratio = bg_pixels / (total - ignore_pixels + 1e-6)
 
-    X.append(base)
-    Y.append(class_presence)
+        if bg_ratio > BG_THRESHOLD:
+            continue
 
-if len(X) == 0:
-    raise RuntimeError("No tiles left after background filtering.")
+        class_presence = np.zeros(NUM_CLASSES, dtype=int)
+        for c in range(NUM_CLASSES):
+            if np.any(lbl == c):
+                class_presence[c] = 1
 
-X = np.array(X)
-Y = np.stack(Y)
+        X.append(base)
+        Y.append(class_presence)
+
+    if len(X) == 0:
+        raise RuntimeError("No tiles left after background filtering.")
+
+    X = np.array(X)
+    Y = np.stack(Y)
+
+    np.savez(cache_path, X=X, Y=Y)
+    print(f"[INFO] Saved filtered tiles to cache: {cache_path}")
+
 
 # ========== Limit total set based on train+val+test ratios ==========
 total_ratio = TRAIN_RATIO + VAL_RATIO + TEST_RATIO

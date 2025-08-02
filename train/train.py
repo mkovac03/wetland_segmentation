@@ -98,8 +98,17 @@ sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_ds.file_li
 
 # ========= Dataloaders =========
 train_loader = DataLoader(train_ds, batch_size=config["batch_size"], sampler=sampler,
-                          num_workers=8, pin_memory=True)
-val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)
+                          num_workers=8, pin_memory=True, prefetch_factor=4, persistent_workers=True)
+val_loader = DataLoader(
+    val_ds,
+    batch_size=8,             # ✅ increase to match training
+    shuffle=False,
+    num_workers=4,
+    pin_memory=True,
+    prefetch_factor=4,
+    persistent_workers=True
+)
+
 
 # ========= Model =========
 model = ResNetUNetViT(config).cuda()
@@ -146,8 +155,12 @@ for epoch in range(config["training"]["epochs"]):
     model.train()
     total_loss = 0.0
 
-    for x, y in tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['training']['epochs']}"):
+    for x, y in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config['training']['epochs']}"):
+        gc.collect()
+        torch.cuda.empty_cache()
+
         x, y = x.cuda(), y.cuda()
+
         optimizer.zero_grad()
         with autocast(device_type='cuda', enabled=config["training"].get("use_amp", True)):
             out = model(x)
@@ -170,7 +183,7 @@ for epoch in range(config["training"]["epochs"]):
             x, y = x.cuda(), y.cuda()
             out = model(x)
             pred = out.argmax(1)
-            all_preds.append(pred.cpu())
+            all_preds.append(pred.cpu().numpy())
             all_labels.append(y.cpu())
             correct += (pred == y).sum().item()
             total += y.numel()
@@ -214,6 +227,9 @@ for epoch in range(config["training"]["epochs"]):
             break
 
     scheduler.step(curr_metric)
+
+    gc.collect()
+    torch.cuda.empty_cache()
 
 log_file.close()
 writer.close()
