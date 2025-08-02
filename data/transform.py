@@ -48,13 +48,14 @@ class RandomAugment:
         # ----- Brightness/contrast jitter -----
         # Brightness jitter (per channel)
         if random.random() < self.p:
-            brightness_factor = random.uniform(0.9, 1.1)
-            img = img * brightness_factor
+            brightness_factors = torch.empty(img.shape[0]).uniform_(0.9, 1.1).to(img.device)
+            img = img * brightness_factors[:, None, None]
 
         # Contrast jitter (normalize–scale–restore)
         if random.random() < self.p:
             mean = img.mean(dim=(1, 2), keepdim=True)
-            img = (img - mean) * random.uniform(0.9, 1.1) + mean
+            scales = torch.empty(img.shape[0]).uniform_(0.9, 1.1).to(img.device)
+            img = (img - mean) * scales[:, None, None] + mean
 
         # ----- Gaussian blur -----
         if random.random() < self.blur_p:

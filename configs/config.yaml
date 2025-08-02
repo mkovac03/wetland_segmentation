@@ -49,6 +49,9 @@ splitting:
   test_ratio: 0.01
   seed: 42
 
+sampling:
+  rare_class_boost: 1.5
+
 logging:
   checkpoint_interval: 5
   eval_interval: 1

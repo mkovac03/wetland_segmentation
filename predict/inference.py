@@ -105,14 +105,23 @@ def run_inference(model, input_tif, output_tif):
         meta.update(count=1, dtype='uint8', compress='lzw', nodata=255)
 
         h, w = src.height, src.width
+        # Compute exact top-left anchors to ensure full coverage
+        y_positions = list(range(0, h - PATCH_SIZE + 1, STRIDE))
+        x_positions = list(range(0, w - PATCH_SIZE + 1, STRIDE))
+
+        if (h - PATCH_SIZE) % STRIDE != 0:
+            y_positions.append(h - PATCH_SIZE)
+        if (w - PATCH_SIZE) % STRIDE != 0:
+            x_positions.append(w - PATCH_SIZE)
+
         logit_accum = np.zeros((NUM_CLASSES, h, w), dtype=np.float32)
         weight_map = np.zeros((h, w), dtype=np.float32)
 
-        for y in range(0, h, STRIDE):
-            for x in range(0, w, STRIDE):
+        for y in y_positions:
+            for x in x_positions:
                 y1, x1 = y, x
-                y2 = min(y + PATCH_SIZE, h)
-                x2 = min(x + PATCH_SIZE, w)
+                y2 = y + PATCH_SIZE
+                x2 = x + PATCH_SIZE
                 dy, dx = y2 - y1, x2 - x1
 
                 window = Window(x1, y1, dx, dy)

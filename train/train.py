@@ -135,7 +135,13 @@ else:
     print(f"[INFO] Re-saved missing weights to: {weights_path}")
 
 assert len(sample_weights) == len(train_ds.file_list), "Mismatch between weights and dataset entries"
-sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_ds.file_list), replacement=True)
+rare_class_boost = config.get("sampling", {}).get("rare_class_boost", 1.5)
+
+tile_scores = np.array(sample_weights)
+tile_scores = tile_scores ** rare_class_boost
+tile_scores /= tile_scores.sum()
+
+sampler = WeightedRandomSampler(tile_scores, num_samples=len(train_ds.file_list), replacement=True)
 
 # ========= Dataloaders =========
 train_loader = DataLoader(train_ds, batch_size=config["batch_size"], sampler=sampler,
