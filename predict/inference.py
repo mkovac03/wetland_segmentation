@@ -116,7 +116,9 @@ def run_inference(model, input_tif, output_tif):
                 dy, dx = y2 - y1, x2 - x1
 
                 window = Window(x1, y1, dx, dy)
-                img = src.read(list(range(2, 2 + INPUT_CHANNELS)), window=window).astype(np.float32)
+                band_offset = config.get("band_offset", 2)  # Default to band 2 if not set
+                band_indices = list(range(band_offset, band_offset + INPUT_CHANNELS))
+                img = src.read(band_indices, window=window).astype(np.float32)
 
                 if img.shape[1] == 0 or img.shape[2] == 0:
                     continue

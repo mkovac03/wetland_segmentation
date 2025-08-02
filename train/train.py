@@ -112,8 +112,27 @@ elif os.path.exists(pixel_path):
     print(f"[INFO] Saved class/sample weights to: {weights_path}")
 
 else:
-    generate_splits_and_weights(config)
-    raise RuntimeError("Re-ran split_data but pixel count file was missing. Please check preprocessing output.")
+    print(f"[WARN] {weights_path} not found, but pixel counts exist at {pixel_path}. Recomputing class/sample weights...")
+    pixel_counts = np.load(pixel_path)
+
+    label_counts = pixel_counts
+    class_weights = 1.0 / (label_counts + 1e-6)
+    class_weights = class_weights * (n_classes / class_weights.sum())
+
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    print("→ Computing sample weights with mmap:")
+    sample_weights = []
+    for base in tqdm(splits["train"]):
+        lbl_path = base + "_lbl.npy"
+        label = np.load(lbl_path, mmap_mode="r").flatten()
+        label = label[(label != 255) & (label < len(class_weights))]
+        weight = np.mean(class_weights[label]) if len(label) > 0 else 0.0
+        sample_weights.append(weight)
+
+    np.savez(weights_path, class_weights=class_weights, sample_weights=sample_weights)
+    print(f"[INFO] Re-saved missing weights to: {weights_path}")
 
 assert len(sample_weights) == len(train_ds.file_list), "Mismatch between weights and dataset entries"
 sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_ds.file_list), replacement=True)
@@ -188,7 +207,8 @@ for epoch in range(config["training"]["epochs"]):
             loss = ft_loss(out, y) + ce_loss(out, y)
 
         scaler.scale(loss).backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clipping"])
+        clip_val = config.get("gradient_clipping", 1.0)  # Default to 1.0 if not specified
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
         scaler.step(optimizer)
         scaler.update()
         total_loss += loss.item()

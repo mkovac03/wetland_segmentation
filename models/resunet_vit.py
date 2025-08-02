@@ -69,8 +69,11 @@ class ResNetUNetViT(nn.Module):
         e4 = self.encoder4(e3)
         e5 = self.encoder5(e4)
 
-        v = self.vit(e5)
-        v = rearrange(v, 'b (h w) c -> b c h w', h=8, w=8)
+        v = self.vit(e5)  # [B, N, C]
+        B, N, C = v.shape
+        patches_per_dim = int(N ** 0.5)
+        assert patches_per_dim ** 2 == N, f"ViT output tokens ({N}) is not a perfect square"
+        v = rearrange(v, 'b (h w) c -> b c h w', h=patches_per_dim, w=patches_per_dim)
         v = F.interpolate(v, size=e4.shape[2:], mode='bilinear', align_corners=False)
 
         d4 = self.up4(v)
