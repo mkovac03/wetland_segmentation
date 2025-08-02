@@ -196,14 +196,14 @@ if __name__ == "__main__":
         if os.path.exists(best_path):
             ckpt_path = best_path
         else:
-            cckpt_files = glob.glob(os.path.join(CKPT_DIR, "model_epoch*_weights.pt"))
+            ckpt_files = glob.glob(os.path.join(CKPT_DIR, "model_epoch*_weights.pt"))
             if ckpt_files:
                 available_epochs = sorted([
                     int(re.search(r'model_epoch(\d+)_weights\.pt', os.path.basename(f)).group(1))
                     for f in ckpt_files
                 ])
                 fallback_epoch = available_epochs[-1]
-                ckpt_path = os.path.join(CKPT_DIR, f"model_epoch{fallback_epoch}.pt")
+                ckpt_path = os.path.join(CKPT_DIR, f"model_epoch{fallback_epoch}_weights.pt")
                 print(f"[WARNING] Fallback: using model_epoch{fallback_epoch}.pt")
             else:
                 raise FileNotFoundError(f"No model checkpoints available in {CKPT_DIR}")
