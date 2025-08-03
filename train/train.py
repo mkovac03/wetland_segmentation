@@ -13,6 +13,8 @@ from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from PIL import Image
+import matplotlib
+matplotlib.use("Agg")  # Prevent GUI backend issues on headless/server mode
 import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_tensor
 import hashlib
@@ -310,11 +312,12 @@ for epoch in range(config["training"]["epochs"]):
             img = Image.open(buf)
             img_tensor = to_tensor(img)
             writer.add_image("Validation/Pred_vs_GT_Grid", img_tensor, global_step=epoch)
-            plt.close(fig)
-            del fig, axs, img_tensor, img
+            plt.close("all")  # Close all figures
+            for ax in axs.flat:
+                ax.clear()
+            del fig, axs, vis_img, sample_x, sample_y, sample_x_vis, pred, img_tensor, img
             gc.collect()
             torch.cuda.empty_cache()
-
 
         except Exception as e:
             print(f"[WARN] TensorBoard image logging failed: {e}")
