@@ -53,7 +53,7 @@ splitting:
   test_ratio: 0.1
   seed: 42
   entropy_percentile: 80        # Keep top 80% by entropy
-  max_training_tiles: 10000     # Optional hard cap
+  max_training_tiles: 5000     # Optional hard cap
 
 sampling:
   rare_class_boost: 1.5

@@ -72,7 +72,6 @@ with open(args.config, "r") as f:
     config = yaml.safe_load(f)
 
 timestamp = os.path.basename(config["processed_dir"])
-run_name = f"{timestamp}"
 
 if "{now}" in config["output_dir"]:
     config["output_dir"] = config["output_dir"].replace("{now}", timestamp)
@@ -227,7 +226,7 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
 
 os.makedirs(config["output_dir"], exist_ok=True)
 log_file = open(os.path.join(config["output_dir"], "training_log.txt"), "a")
-writer = SummaryWriter(log_dir=os.path.join(config["output_dir"], run_name))
+writer = SummaryWriter(log_dir=os.path.join(config["output_dir"]))
 
 
 save_every = config.get("save_every", 5)
