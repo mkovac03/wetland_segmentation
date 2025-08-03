@@ -99,7 +99,7 @@ with open(config["splits_path"], "r") as f:
 
 # ========= TensorBoard =========
 if config.get("tensorboard", {}).get("restart", True):
-    port = config.get("tensorboard", {}).get("port", 6010)
+    port = config.get("tensorboard", {}).get("port", 6006)
     restart_tensorboard(logdir=config["output_dir"], port=port)
 
 # ========= Dataset =========
@@ -322,6 +322,7 @@ for epoch in range(config["training"]["epochs"]):
             del fig, axs, vis_img, sample_x, sample_y, sample_x_vis, pred, img_tensor, img
             gc.collect()
             torch.cuda.empty_cache()
+            writer.flush()
 
         except Exception as e:
             print(f"[WARN] TensorBoard image logging failed: {e}")
