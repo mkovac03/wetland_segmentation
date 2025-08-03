@@ -72,6 +72,7 @@ with open(args.config, "r") as f:
     config = yaml.safe_load(f)
 
 timestamp = os.path.basename(config["processed_dir"])
+run_name = f"run_{timestamp}"
 
 if "{now}" in config["output_dir"]:
     config["output_dir"] = config["output_dir"].replace("{now}", timestamp)
@@ -226,7 +227,8 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
 
 os.makedirs(config["output_dir"], exist_ok=True)
 log_file = open(os.path.join(config["output_dir"], "training_log.txt"), "a")
-writer = SummaryWriter(log_dir=config["output_dir"])
+writer = SummaryWriter(log_dir=os.path.join(config["output_dir"], run_name))
+
 
 save_every = config.get("save_every", 5)
 
@@ -305,7 +307,7 @@ for epoch in range(config["training"]["epochs"]):
                 vis_img = vis_img.permute(1, 2, 0).numpy()  # HWC for imshow
 
                 axs[i, 0].imshow(vis_img)
-                axs[i, 0].set_title("Input (RGB)")
+                axs[i, 0].set_title("Google Embeddings (1-2-3)")
                 axs[i, 1].imshow(sample_y, cmap="tab20")
                 axs[i, 1].set_title("Ground Truth")
                 axs[i, 2].imshow(pred, cmap="tab20")
