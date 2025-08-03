@@ -106,6 +106,7 @@ if config.get("tensorboard", {}).get("restart", True):
     restart_tensorboard(logdir=config["output_dir"], port=port)
 
 # ========= TensorBoard writer path =========
+os.makedirs(config["output_dir"], exist_ok=True)
 writer = SummaryWriter(log_dir=config["output_dir"])
 
 # ========= Dataset =========
@@ -225,10 +226,7 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     patience=scheduler_cfg.get("patience", 5)
 )
 
-os.makedirs(config["output_dir"], exist_ok=True)
 log_file = open(os.path.join(config["output_dir"], "training_log.txt"), "a")
-writer = SummaryWriter(log_dir=os.path.join(config["output_dir"]))
-
 
 save_every = config.get("save_every", 5)
 
