@@ -32,7 +32,7 @@ training:
   scheduler_patience: 10
 
 tensorboard:
-  restart: true
+  restart: false
   port: 6010
 
 loss:
