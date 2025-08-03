@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_tensor
 import hashlib
 import subprocess
+import datetime
 
 from data.dataset import GoogleEmbedDataset
 from data.transform import RandomAugment
@@ -42,13 +43,19 @@ def restart_tensorboard(logdir, port=6010):
             f"--logdir={logdir}",
             f"--port={port}",
             "--host=127.0.0.1",
-            "--reload_interval=5"
+            "--reload_interval=5",
+            "--load_fast=false"  # safer for large logs
         ])
         print(f"[INFO] TensorBoard restarted at http://localhost:{port}")
     except Exception as e:
         print(f"[WARN] Failed to restart TensorBoard: {e}")
 
-torch.backends.cudnn.benchmark = True
+# ========= Crash Debugging =========
+print("[DEBUG] CUDA devices available:", torch.cuda.device_count())
+print("[DEBUG] CUDA memory allocated (MB):", torch.cuda.memory_allocated() / 1024**2)
+print("[DEBUG] CUDA memory reserved (MB):", torch.cuda.memory_reserved() / 1024**2)
+
+subprocess.run(["nvidia-smi"])  # Print GPU status once at the beginning
 
 print(torch.cuda.get_device_name(0))
 print("CUDA available:", torch.cuda.is_available())
@@ -61,6 +68,9 @@ args = parser.parse_args()
 
 with open(args.config, "r") as f:
     config = yaml.safe_load(f)
+
+# ========= Timestamp Logging =========
+print("[DEBUG] Training start time:", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 def get_split_hash(cfg):
     split_cfg = cfg["splitting"]
