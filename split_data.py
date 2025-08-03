@@ -105,18 +105,7 @@ def generate_splits_and_weights(config):
     print(f"[INFO] Saved splits to {split_path}")
     print(f"[INFO] Train: {len(splits['train'])}, Val: {len(splits['val'])}, Test: {len(splits['test'])}, Total: {len(X)}")
 
-    print("[INFO] Calculating pixel-wise class distribution for weighting...")
-    train_ds = GoogleEmbedDataset(splits["train"], check_files=True)
-    pixel_counts = np.zeros(num_classes, dtype=np.int64)
-    for i in tqdm(range(len(train_ds)), desc="Counting pixels"):
-        _, lbl = train_ds[i]
-        for c in range(num_classes):
-            pixel_counts[c] += torch.sum(lbl == c).item()
-
-    pixel_path = os.path.join(input_dir, f"weights_{timestamp}_{split_hash}_pixels.npy")
-    np.save(pixel_path, pixel_counts)
-    print(f"[INFO] Saved pixel counts to {pixel_path}")
-    return splits, pixel_counts
+    return splits
 
 
 # ========= CLI entry point ==========

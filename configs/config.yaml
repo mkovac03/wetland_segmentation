@@ -8,7 +8,7 @@ crs_target: "EPSG:3035"
 
 patch_size: 512
 stride: 512
-batch_size: 16
+batch_size: 8
 num_classes: 13
 input_channels: 22
 
@@ -44,9 +44,9 @@ gradient_clipping: 1.0
 
 splitting:
   background_threshold: 0.9
-  train_ratio: 0.15      # ← NEW: 5% for training
-  val_ratio: 0.1
-  test_ratio: 0.1
+  train_ratio: 0.075      # ← NEW: 5% for training
+  val_ratio: 0.05
+  test_ratio: 0.05
   seed: 42
 
 sampling:
