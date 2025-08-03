@@ -41,6 +41,8 @@ def generate_splits_and_weights(config):
     train_ratio = split_cfg.get("train_ratio", 0.8)
     val_ratio = split_cfg.get("val_ratio", 0.1)
     test_ratio = split_cfg.get("test_ratio", 0.1)
+    max_tiles = split_cfg.get("max_training_tiles", None)
+    entropy_cut = split_cfg.get("entropy_percentile", None)
 
     file_list = get_file_list(input_dir)
     if len(file_list) == 0:
@@ -63,16 +65,40 @@ def generate_splits_and_weights(config):
             bg_ratio = bg_pixels / (total - ignore_pixels + 1e-6)
             if bg_ratio > bg_threshold:
                 continue
+
+            lbl_flat = lbl[lbl != ignore_index]
+            counts = np.bincount(lbl_flat, minlength=num_classes)
+            probs = counts / (counts.sum() + 1e-8)
+            entropy = -np.sum(probs * np.log2(probs + 1e-8))
+
             class_presence = np.zeros(num_classes, dtype=int)
             for c in range(num_classes):
-                if np.any(lbl == c):
+                if counts[c] > 0:
                     class_presence[c] = 1
-            X.append(base)
+
+            X.append((base, entropy))
             Y.append(class_presence)
+
         if len(X) == 0:
             raise RuntimeError("No tiles left after background filtering.")
-        X = np.array(X)
-        Y = np.stack(Y)
+
+        # Sort by entropy descending
+        sorted_pairs = sorted(zip(X, Y), key=lambda pair: -pair[0][1])
+        X_sorted, Y_sorted = zip(*sorted_pairs)
+        X = np.array([x[0] for x in X_sorted])
+        Y = np.stack(Y_sorted)
+
+        if entropy_cut is not None:
+            keep_n = int(len(X) * entropy_cut / 100)
+            X = X[:keep_n]
+            Y = Y[:keep_n]
+            print(f"[INFO] Kept top {keep_n} tiles based on entropy percentile cutoff ({entropy_cut}%)")
+
+        if max_tiles is not None and len(X) > max_tiles:
+            X = X[:max_tiles]
+            Y = Y[:max_tiles]
+            print(f"[INFO] Truncated to max {max_tiles} tiles after entropy filtering")
+
         np.savez(cache_path, X=X, Y=Y)
         print(f"[INFO] Saved filtered tiles to cache: {cache_path}")
 
