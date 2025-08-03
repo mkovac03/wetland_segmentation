@@ -31,6 +31,10 @@ training:
   scheduler: reduce_on_plateau
   scheduler_patience: 10
 
+tensorboard:
+  restart: true
+  port: 6010
+
 loss:
   focal:
     alpha: 0.25

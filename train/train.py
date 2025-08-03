@@ -16,6 +16,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_tensor
 import hashlib
+import subprocess
 
 from data.dataset import GoogleEmbedDataset
 from data.transform import RandomAugment
@@ -31,6 +32,21 @@ def is_master_process():
 
 def convert_to_fp16(state_dict):
     return {k: v.half() if v.dtype == torch.float32 else v for k, v in state_dict.items()}
+
+def restart_tensorboard(logdir, port=6010):
+    try:
+        subprocess.run(["pkill", "-f", "tensorboard"], check=False)
+        subprocess.run(["pkill", "-f", "tensorboard_data_server"], check=False)
+        subprocess.Popen([
+            "tensorboard",
+            f"--logdir={logdir}",
+            f"--port={port}",
+            "--host=127.0.0.1",
+            "--reload_interval=5"
+        ])
+        print(f"[INFO] TensorBoard restarted at http://localhost:{port}")
+    except Exception as e:
+        print(f"[WARN] Failed to restart TensorBoard: {e}")
 
 torch.backends.cudnn.benchmark = True
 
@@ -68,6 +84,12 @@ if not os.path.exists(config["splits_path"]):
 
 with open(config["splits_path"], "r") as f:
     splits = json.load(f)
+
+# ========= TensorBoard =========
+writer = SummaryWriter(log_dir=config["output_dir"])
+if config.get("tensorboard", {}).get("restart", True):
+    port = config.get("tensorboard", {}).get("port", 6010)
+    restart_tensorboard(logdir=config["output_dir"], port=port)
 
 # ========= Dataset =========
 train_transform = RandomAugment(p=0.5)
@@ -248,36 +270,37 @@ for epoch in range(config["training"]["epochs"]):
     if (epoch + 1) % save_every == 0 or epoch == 0:
         model.eval()
         try:
-            sample_x, sample_y = val_ds[0]
-            sample_x_vis = sample_x.clone()
-            sample_x = sample_x.unsqueeze(0).cuda()
-            with torch.no_grad():
-                pred = model(sample_x).argmax(1).squeeze().cpu()
+            num_samples = 5
+            fig, axs = plt.subplots(num_samples, 3, figsize=(12, 3 * num_samples))
 
-            # Normalize input for visualization (use first 3 channels)
-            vis_img = sample_x_vis[0:3]  # take first 3 channels for RGB-like view
-            vis_img = (vis_img - vis_img.min()) / (vis_img.max() - vis_img.min())
-            vis_img = vis_img.permute(1, 2, 0).numpy()  # HWC for imshow
+            for i in range(num_samples):
+                sample_x, sample_y = val_ds[i]
+                sample_x_vis = sample_x.clone()
+                sample_x = sample_x.unsqueeze(0).cuda()
+                with torch.no_grad():
+                    pred = model(sample_x).argmax(1).squeeze().cpu()
 
-            fig, axs = plt.subplots(1, 3, figsize=(12, 4))
-            axs[0].imshow(vis_img)
-            axs[0].set_title("Input (3 Bands)")
-            axs[1].imshow(sample_y, cmap="tab20")
-            axs[1].set_title("Ground Truth")
-            axs[2].imshow(pred, cmap="tab20")
-            axs[2].set_title("Prediction")
+                vis_img = sample_x_vis[0:3]  # use first 3 channels for RGB-like view
+                vis_img = (vis_img - vis_img.min()) / (vis_img.max() - vis_img.min())
+                vis_img = vis_img.permute(1, 2, 0).numpy()  # HWC for imshow
 
-            for ax in axs:
-                ax.axis("off")
+                axs[i, 0].imshow(vis_img)
+                axs[i, 0].set_title("Input (RGB)")
+                axs[i, 1].imshow(sample_y, cmap="tab20")
+                axs[i, 1].set_title("Ground Truth")
+                axs[i, 2].imshow(pred, cmap="tab20")
+                axs[i, 2].set_title("Prediction")
+
+                for j in range(3):
+                    axs[i, j].axis("off")
+
             plt.tight_layout()
-
-            # Convert matplotlib figure to TensorBoard image
             buf = io.BytesIO()
             plt.savefig(buf, format="png")
             buf.seek(0)
             img = Image.open(buf)
             img_tensor = to_tensor(img)
-            writer.add_image("Validation/Pred_vs_GT", img_tensor, global_step=epoch)
+            writer.add_image("Validation/Pred_vs_GT_Grid", img_tensor, global_step=epoch)
             plt.close(fig)
 
         except Exception as e:
