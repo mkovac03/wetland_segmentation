@@ -41,7 +41,9 @@ class CombinedFocalTverskyLoss(nn.Module):
 
         # Boundary weighting
         if self.use_boundary:
-            boundary_mask = self._compute_boundary_mask(targets).to(device)
+            sanitized_targets = targets.clone()
+            sanitized_targets[sanitized_targets == self.ignore_index] = 0  # Safe dummy
+            boundary_mask = self._compute_boundary_mask(sanitized_targets).to(device)
             weight_map = torch.where(boundary_mask.bool(), self.boundary_weight, 1.0)
         else:
             weight_map = torch.ones_like(valid_mask)
@@ -74,18 +76,19 @@ class CombinedFocalTverskyLoss(nn.Module):
 
         return total_loss
 
-    def _compute_boundary_mask(self, targets):
+    def _compute_boundary_mask(self, sanitized_targets):
         """
-        Dilate the valid (non-ignore) mask to form a soft boundary around valid areas.
+        Compute soft boundary mask from sanitized targets (no ignore_index values).
         """
-        b, h, w = targets.shape
+        b, h, w = sanitized_targets.shape
         boundary = torch.zeros((b, h, w), dtype=torch.float32)
 
         for i in range(b):
-            t = targets[i].detach().cpu().numpy()
-            t_mask = (t != self.ignore_index)
+            t = sanitized_targets[i].detach().cpu().numpy()
+            t_mask = (t != 0)  # now use 0 as the dummy, not ignore_index
             t_dilated = binary_dilation(t_mask, iterations=1)
             edges = t_dilated & ~t_mask
             boundary[i] = torch.from_numpy(edges.astype(np.float32))
 
         return boundary
+

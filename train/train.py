@@ -238,6 +238,10 @@ for epoch in range(config["training"]["epochs"]):
         optimizer.zero_grad()
         with autocast(device_type='cuda', enabled=config["training"].get("use_amp", True)):
             out = model(x)
+            valid_mask = (y != 255) & (y < n_classes)
+            if valid_mask.sum() == 0:
+                continue  # skip empty batch
+
             loss = ft_loss(out, y) + ce_loss(out, y)
 
         scaler.scale(loss).backward()
