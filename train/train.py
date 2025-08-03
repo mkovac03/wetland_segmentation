@@ -280,7 +280,7 @@ for epoch in range(config["training"]["epochs"]):
     if (epoch + 1) % save_every == 0 or epoch == 0:
         model.eval()
         try:
-            num_samples = 5
+            num_samples = 3
             fig, axs = plt.subplots(num_samples, 3, figsize=(12, 3 * num_samples))
 
             for i in range(num_samples):
@@ -312,6 +312,10 @@ for epoch in range(config["training"]["epochs"]):
             img_tensor = to_tensor(img)
             writer.add_image("Validation/Pred_vs_GT_Grid", img_tensor, global_step=epoch)
             plt.close(fig)
+            del fig, axs, img_tensor, img
+            gc.collect()
+            torch.cuda.empty_cache()
+
 
         except Exception as e:
             print(f"[WARN] TensorBoard image logging failed: {e}")
