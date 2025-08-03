@@ -36,7 +36,7 @@ def is_master_process():
 def convert_to_fp16(state_dict):
     return {k: v.half() if v.dtype == torch.float32 else v for k, v in state_dict.items()}
 
-def restart_tensorboard(logdir, port=6010):
+def restart_tensorboard(logdir, port=6006):
     try:
         subprocess.run(["pkill", "-f", "tensorboard"], check=False)
         subprocess.run(["pkill", "-f", "tensorboard_data_server"], check=False)
@@ -106,9 +106,7 @@ if config.get("tensorboard", {}).get("restart", True):
     restart_tensorboard(logdir=config["output_dir"], port=port)
 
 # ========= TensorBoard writer path =========
-tb_subdir = os.path.join(config["output_dir"], "tb", timestamp)
-os.makedirs(tb_subdir, exist_ok=True)
-writer = SummaryWriter(log_dir=tb_subdir)
+writer = SummaryWriter(log_dir=config["output_dir"])
 
 # ========= Dataset =========
 train_transform = RandomAugment(p=0.5)
