@@ -46,7 +46,7 @@ def restart_tensorboard(logdir, port=6010):
             f"--port={port}",
             "--host=127.0.0.1",
             "--reload_interval=5",
-            "--load_fast=false"  # safer for large logs
+            "--load_fast=false"
         ])
         print(f"[INFO] TensorBoard restarted at http://localhost:{port}")
     except Exception as e:
@@ -57,7 +57,7 @@ print("[DEBUG] CUDA devices available:", torch.cuda.device_count())
 print("[DEBUG] CUDA memory allocated (MB):", torch.cuda.memory_allocated() / 1024**2)
 print("[DEBUG] CUDA memory reserved (MB):", torch.cuda.memory_reserved() / 1024**2)
 
-subprocess.run(["nvidia-smi"])  # Print GPU status once at the beginning
+subprocess.run(["nvidia-smi"])
 
 print(torch.cuda.get_device_name(0))
 print("CUDA available:", torch.cuda.is_available())
@@ -76,8 +76,6 @@ timestamp = os.path.basename(config["processed_dir"])
 if "{now}" in config["output_dir"]:
     config["output_dir"] = config["output_dir"].replace("{now}", timestamp)
 
-
-# ========= Timestamp Logging =========
 print("[DEBUG] Training start time:", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 def get_split_hash(cfg):
@@ -106,6 +104,11 @@ with open(config["splits_path"], "r") as f:
 if config.get("tensorboard", {}).get("restart", True):
     port = config.get("tensorboard", {}).get("port", 6006)
     restart_tensorboard(logdir=config["output_dir"], port=port)
+
+# ========= TensorBoard writer path =========
+tb_subdir = os.path.join(config["output_dir"], "tb", timestamp)
+os.makedirs(tb_subdir, exist_ok=True)
+writer = SummaryWriter(log_dir=tb_subdir)
 
 # ========= Dataset =========
 train_transform = RandomAugment(p=0.5)
