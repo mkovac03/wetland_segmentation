@@ -162,14 +162,14 @@ sampler = WeightedRandomSampler(tile_scores, num_samples=len(train_ds.file_list)
 
 # ========= Dataloaders =========
 train_loader = DataLoader(train_ds, batch_size=config["batch_size"], sampler=sampler,
-                          num_workers=4, pin_memory=True, prefetch_factor=4, persistent_workers=True)
+                          num_workers=2, pin_memory=True, prefetch_factor=2, persistent_workers=True)
 val_loader = DataLoader(
     val_ds,
     batch_size=config["batch_size"],  # unified
     shuffle=False,
     num_workers=2,
     pin_memory=True,
-    prefetch_factor=4,
+    prefetch_factor=2,
     persistent_workers=True
 )
 
