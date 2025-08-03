@@ -96,7 +96,6 @@ with open(config["splits_path"], "r") as f:
     splits = json.load(f)
 
 # ========= TensorBoard =========
-writer = SummaryWriter(log_dir=config["output_dir"])
 if config.get("tensorboard", {}).get("restart", True):
     port = config.get("tensorboard", {}).get("port", 6010)
     restart_tensorboard(logdir=config["output_dir"], port=port)
