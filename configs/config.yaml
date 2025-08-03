@@ -32,8 +32,8 @@ training:
   scheduler_patience: 10
 
 tensorboard:
-  restart: false
-  port: 6010
+  restart: true
+  port: 6006
 
 loss:
   focal:
