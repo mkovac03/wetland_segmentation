@@ -72,7 +72,7 @@ with open(args.config, "r") as f:
     config = yaml.safe_load(f)
 
 timestamp = os.path.basename(config["processed_dir"])
-run_name = f"run_{timestamp}"
+run_name = f"{timestamp}"
 
 if "{now}" in config["output_dir"]:
     config["output_dir"] = config["output_dir"].replace("{now}", timestamp)
