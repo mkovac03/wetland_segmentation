@@ -71,6 +71,12 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     config = yaml.safe_load(f)
 
+timestamp = os.path.basename(config["processed_dir"])
+
+if "{now}" in config["output_dir"]:
+    config["output_dir"] = config["output_dir"].replace("{now}", timestamp)
+
+
 # ========= Timestamp Logging =========
 print("[DEBUG] Training start time:", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -88,7 +94,6 @@ def get_split_hash(cfg):
 
 # ========= Load splits =========
 split_hash = get_split_hash(config)
-timestamp = os.path.basename(config["processed_dir"])
 config["splits_path"] = f"data/splits/splits_{timestamp}_{split_hash}.json"
 
 if not os.path.exists(config["splits_path"]):
