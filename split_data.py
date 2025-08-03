@@ -63,7 +63,10 @@ def generate_splits_and_weights(config):
             bg_pixels = np.sum(lbl == background_class)
             ignore_pixels = np.sum(lbl == ignore_index)
             bg_ratio = bg_pixels / (total - ignore_pixels + 1e-6)
-            if bg_ratio > bg_threshold:
+            water_pixels = np.sum(lbl == 10)
+            water_ratio = water_pixels / (total - ignore_pixels + 1e-6)
+
+            if bg_ratio > bg_threshold or water_ratio > 0.9:
                 continue
 
             lbl_flat = lbl[lbl != ignore_index]
