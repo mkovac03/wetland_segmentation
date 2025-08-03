@@ -3,12 +3,12 @@
 input_dir: "/media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_01_22"
 processed_dir: "data/processed/{now}"
 splits_path: "data/splits/splits_{now}.json"
-output_dir: "outputs/{now}"
+output_dir: "/home/lkm413/wetland_segmentation/outputs/{now}"
 crs_target: "EPSG:3035"
 
 patch_size: 512
 stride: 512
-batch_size: 24
+batch_size: 16
 num_classes: 13
 input_channels: 22
 
@@ -44,9 +44,9 @@ gradient_clipping: 1.0
 
 splitting:
   background_threshold: 0.9
-  train_ratio: 0.3      # ← NEW: 5% for training
-  val_ratio: 0.2
-  test_ratio: 0.2
+  train_ratio: 0.15      # ← NEW: 5% for training
+  val_ratio: 0.1
+  test_ratio: 0.1
   seed: 42
 
 sampling:

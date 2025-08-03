@@ -82,30 +82,43 @@ if len(train_ds) == 0 or len(val_ds) == 0:
 n_classes = config["num_classes"]
 print("→ Calculating pixel-wise class distribution for weighting...")
 
-weights_path = os.path.join(config["processed_dir"], f"weights_{timestamp}_{split_hash}.npz")
-pixel_path   = os.path.join(config["processed_dir"], f"weights_{timestamp}_{split_hash}_pixels.npy")
-os.makedirs(os.path.dirname(weights_path), exist_ok=True)
+weights_dir = os.path.join(config["output_dir"], "weights")
+os.makedirs(weights_dir, exist_ok=True)
 
+weights_path = os.path.join(weights_dir, f"weights_{timestamp}_{split_hash}.npz")
+pixel_path   = os.path.join(weights_dir, f"weights_{timestamp}_{split_hash}_pixels.npy")
+os.makedirs(weights_dir, exist_ok=True)
+
+# === 1. Pixel counts ===
+if os.path.exists(pixel_path):
+    print(f"[INFO] Found pixel counts at: {pixel_path}")
+    label_counts = np.load(pixel_path)
+else:
+    print("→ Computing pixel-wise label counts...")
+    label_counts = np.zeros(n_classes, dtype=np.int64)
+    for base in tqdm(splits["train"], desc="Counting pixels"):
+        lbl_path = base + "_lbl.npy"
+        label = np.load(lbl_path, mmap_mode="r")
+        mask = (label != 255) & (label < n_classes)
+        valid = label[mask]
+        count = np.bincount(valid.flatten(), minlength=n_classes)
+        label_counts[:len(count)] += count
+    np.save(pixel_path, label_counts)
+    print(f"[INFO] Saved pixel counts to: {pixel_path}")
+
+# === 2. Class/sample weights ===
 if os.path.exists(weights_path):
-    print(f"[INFO] Loading class/sample weights from: {weights_path}")
+    print(f"[INFO] Found class/sample weights at: {weights_path}")
     data = np.load(weights_path)
     class_weights = data["class_weights"]
     sample_weights = data["sample_weights"]
-
-elif os.path.exists(pixel_path):
-    print(f"[INFO] Loaded pixel counts from: {pixel_path}")
-    pixel_counts = np.load(pixel_path)
-
-    label_counts = pixel_counts
+else:
+    print("→ Computing class/sample weights...")
     class_weights = 1.0 / (label_counts + 1e-6)
-    class_weights = class_weights * (n_classes / class_weights.sum())
+    class_weights *= (n_classes / class_weights.sum())
 
-    torch.cuda.empty_cache()
-    gc.collect()
-
-    print("→ Computing sample weights with mmap:")
     sample_weights = []
-    for base in tqdm(splits["train"]):
+    for base in tqdm(splits["train"], desc="Computing sample weights"):
         lbl_path = base + "_lbl.npy"
         label = np.load(lbl_path, mmap_mode="r").flatten()
         label = label[(label != 255) & (label < len(class_weights))]
@@ -115,28 +128,6 @@ elif os.path.exists(pixel_path):
     np.savez(weights_path, class_weights=class_weights, sample_weights=sample_weights)
     print(f"[INFO] Saved class/sample weights to: {weights_path}")
 
-else:
-    print(f"[WARN] {weights_path} not found, but pixel counts exist at {pixel_path}. Recomputing class/sample weights...")
-    pixel_counts = np.load(pixel_path)
-
-    label_counts = pixel_counts
-    class_weights = 1.0 / (label_counts + 1e-6)
-    class_weights = class_weights * (n_classes / class_weights.sum())
-
-    torch.cuda.empty_cache()
-    gc.collect()
-
-    print("→ Computing sample weights with mmap:")
-    sample_weights = []
-    for base in tqdm(splits["train"]):
-        lbl_path = base + "_lbl.npy"
-        label = np.load(lbl_path, mmap_mode="r").flatten()
-        label = label[(label != 255) & (label < len(class_weights))]
-        weight = np.mean(class_weights[label]) if len(label) > 0 else 0.0
-        sample_weights.append(weight)
-
-    np.savez(weights_path, class_weights=class_weights, sample_weights=sample_weights)
-    print(f"[INFO] Re-saved missing weights to: {weights_path}")
 
 assert len(sample_weights) == len(train_ds.file_list), "Mismatch between weights and dataset entries"
 rare_class_boost = config.get("sampling", {}).get("rare_class_boost", 1.5)
