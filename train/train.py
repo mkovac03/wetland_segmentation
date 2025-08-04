@@ -107,7 +107,8 @@ if config.get("tensorboard", {}).get("restart", True):
 
 # ========= TensorBoard writer path =========
 os.makedirs(config["output_dir"], exist_ok=True)
-writer = SummaryWriter(log_dir=config["output_dir"])
+run_name = os.path.basename(config["output_dir"])
+writer = SummaryWriter(log_dir=os.path.join("outputs", "tensorboard", run_name))
 
 # ========= Dataset =========
 train_transform = RandomAugment(p=0.5)
