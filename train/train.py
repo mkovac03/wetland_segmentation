@@ -28,6 +28,7 @@ from models.resunet_vit import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
 from losses.focal_tversky import CombinedFocalTverskyLoss
 from split_data import generate_splits_and_weights
+from utils.plotting import add_prediction_legend
 import argparse
 import gc
 
@@ -324,20 +325,13 @@ for epoch in range(config["training"]["epochs"]):
                 for j in range(3):
                     axs[i, j].axis("off")
 
-            # Add legend to the last prediction panel
-            class_colors = plt.cm.tab20(np.linspace(0, 1, config["num_classes"]))
             label_names = {
                 0: "No Wetland", 1: "Rice Fields", 2: "Riparian, fluvial and swamp forest",
                 3: "Managed or grazed meadow", 4: "Wet grasslands", 5: "Wet heaths", 6: "Beaches",
                 7: "Inland marshes", 8: "Open mires", 9: "Salt marshes", 10: "Surface water",
                 11: "Saltpans", 12: "Intertidal flats"
             }
-            legend_patches = [
-                mpatches.Patch(color=class_colors[i], label=label_names.get(i, f"Class {i}"))
-                for i in range(config["num_classes"])
-            ]
-            axs[-1, 2].legend(handles=legend_patches, loc='center left', bbox_to_anchor=(1.0, 0.5),
-                              fontsize='small', frameon=False)
+            add_prediction_legend(axs[-1, 2], config["num_classes"], label_names)
 
             plt.tight_layout()
             buf = io.BytesIO()
