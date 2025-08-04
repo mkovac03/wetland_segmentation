@@ -322,6 +322,7 @@ for epoch in range(config["training"]["epochs"]):
 
             # Add legend to the last prediction panel
             class_colors = plt.cm.tab20(np.linspace(0, 1, config["num_classes"]))
+            label_names = {}  # Ensure label_names is defined or loaded earlier
             class_labels = label_names if label_names else {i: f"Class {i}" for i in range(config["num_classes"])}
             legend_patches = [mpatches.Patch(color=class_colors[i], label=class_labels.get(str(i), f"Class {i}"))
                               for i in range(config["num_classes"])]
