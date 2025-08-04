@@ -5,12 +5,13 @@ import yaml
 import numpy as np
 import torch
 import hashlib
+import re
 from tqdm import tqdm
 from sklearn.utils import shuffle
+from collections import defaultdict
 from iterstrat.ml_stratifiers import MultilabelStratifiedShuffleSplit
 
 from data.dataset import get_file_list, GoogleEmbedDataset
-
 
 def get_split_hash(cfg):
     split_cfg = cfg["splitting"]
@@ -24,6 +25,9 @@ def get_split_hash(cfg):
     }, sort_keys=True)
     return hashlib.md5(hash_input.encode()).hexdigest()[:8]
 
+def extract_utm_zone(path):
+    match = re.search(r"326\d{2}", path)
+    return match.group(0) if match else "unknown"
 
 def generate_splits_and_weights(config):
     input_dir = config["processed_dir"].rstrip("/")
@@ -43,67 +47,75 @@ def generate_splits_and_weights(config):
     test_ratio = split_cfg.get("test_ratio", 0.1)
     max_tiles = split_cfg.get("max_training_tiles", None)
     entropy_cut = split_cfg.get("entropy_percentile", None)
+    stratify_by_utm = split_cfg.get("stratify_by_utm", False)
+    utm_strategy = split_cfg.get("utm_sampling_strategy", "equal")
 
     file_list = get_file_list(input_dir)
     if len(file_list) == 0:
         raise RuntimeError(f"No input .npy tiles found in {input_dir}")
 
-    cache_path = os.path.join(input_dir, f"filtered_tiles_{num_classes}_classes.npz")
-    if os.path.exists(cache_path):
-        print(f"[INFO] Loading filtered tiles from cache: {cache_path}")
-        data = np.load(cache_path, allow_pickle=True)
-        X, Y = data["X"], data["Y"]
-    else:
-        print("[INFO] Filtering and analyzing label content for each tile...")
-        X, Y = [], []
-        for base in tqdm(file_list):
-            lbl_path = base + "_lbl.npy"
-            lbl = np.load(lbl_path)
-            total = lbl.size
-            bg_pixels = np.sum(lbl == background_class)
-            ignore_pixels = np.sum(lbl == ignore_index)
-            bg_ratio = bg_pixels / (total - ignore_pixels + 1e-6)
-            water_pixels = np.sum(lbl == 10)
-            water_ratio = water_pixels / (total - ignore_pixels + 1e-6)
+    print("[INFO] Filtering and analyzing label content for each tile...")
+    X_full, Y_full, E_full, U_full = [], [], [], []
+    for base in tqdm(file_list):
+        lbl_path = base + "_lbl.npy"
+        lbl = np.load(lbl_path)
+        total = lbl.size
+        bg_pixels = np.sum(lbl == background_class)
+        ignore_pixels = np.sum(lbl == ignore_index)
+        bg_ratio = bg_pixels / (total - ignore_pixels + 1e-6)
+        water_pixels = np.sum(lbl == 10)
+        water_ratio = water_pixels / (total - ignore_pixels + 1e-6)
 
-            if bg_ratio > bg_threshold or water_ratio > 0.9:
-                continue
+        if bg_ratio > bg_threshold or water_ratio > 0.9:
+            continue
 
-            lbl_flat = lbl[lbl != ignore_index]
-            counts = np.bincount(lbl_flat, minlength=num_classes)
-            probs = counts / (counts.sum() + 1e-8)
-            entropy = -np.sum(probs * np.log2(probs + 1e-8))
+        lbl_flat = lbl[lbl != ignore_index]
+        counts = np.bincount(lbl_flat, minlength=num_classes)
+        probs = counts / (counts.sum() + 1e-8)
+        entropy = -np.sum(probs * np.log2(probs + 1e-8))
 
-            class_presence = np.zeros(num_classes, dtype=int)
-            for c in range(num_classes):
-                if counts[c] > 0:
-                    class_presence[c] = 1
+        class_presence = np.zeros(num_classes, dtype=int)
+        for c in range(num_classes):
+            if counts[c] > 0:
+                class_presence[c] = 1
 
-            X.append((base, entropy))
-            Y.append(class_presence)
+        utm = extract_utm_zone(base)
+        X_full.append(base)
+        Y_full.append(class_presence)
+        E_full.append(entropy)
+        U_full.append(utm)
 
-        if len(X) == 0:
-            raise RuntimeError("No tiles left after background filtering.")
+    if len(X_full) == 0:
+        raise RuntimeError("No tiles left after background filtering.")
 
-        # Sort by entropy descending
-        sorted_pairs = sorted(zip(X, Y), key=lambda pair: -pair[0][1])
-        X_sorted, Y_sorted = zip(*sorted_pairs)
-        X = np.array([x[0] for x in X_sorted])
-        Y = np.stack(Y_sorted)
+    tiles_by_utm = defaultdict(list)
+    for base, ent, cls, utm in zip(X_full, E_full, Y_full, U_full):
+        tiles_by_utm[utm].append((base, ent, cls))
 
-        if entropy_cut is not None:
-            keep_n = int(len(X) * entropy_cut / 100)
-            X = X[:keep_n]
-            Y = Y[:keep_n]
-            print(f"[INFO] Kept top {keep_n} tiles based on entropy percentile cutoff ({entropy_cut}%)")
+    selected_X, selected_Y = [], []
+    utms_used = sorted(tiles_by_utm.keys())
+    per_zone = max_tiles // len(utms_used) if max_tiles and utm_strategy == "equal" else None
 
-        if max_tiles is not None and len(X) > max_tiles:
-            X = X[:max_tiles]
-            Y = Y[:max_tiles]
-            print(f"[INFO] Truncated to max {max_tiles} tiles after entropy filtering")
+    for utm in utms_used:
+        zone_tiles = sorted(tiles_by_utm[utm], key=lambda t: -t[1])  # sort by entropy desc
+        if entropy_cut:
+            top_n = int(len(zone_tiles) * entropy_cut / 100)
+            zone_tiles = zone_tiles[:top_n]
 
-        np.savez(cache_path, X=X, Y=Y)
-        print(f"[INFO] Saved filtered tiles to cache: {cache_path}")
+        if max_tiles:
+            if utm_strategy == "equal":
+                zone_tiles = zone_tiles[:per_zone]
+            elif utm_strategy == "proportional":
+                prop = len(zone_tiles) / len(X_full)
+                zone_tiles = zone_tiles[:int(prop * max_tiles)]
+
+        for base, _, cls in zone_tiles:
+            selected_X.append(base)
+            selected_Y.append(cls)
+
+    X = np.array(selected_X)
+    Y = np.stack(selected_Y)
+    print(f"[INFO] Total selected tiles: {len(X)} after entropy and UTM-based filtering")
 
     total_ratio = train_ratio + val_ratio + test_ratio
     if total_ratio < 1.0:
@@ -134,10 +146,19 @@ def generate_splits_and_weights(config):
     print(f"[INFO] Saved splits to {split_path}")
     print(f"[INFO] Train: {len(splits['train'])}, Val: {len(splits['val'])}, Test: {len(splits['test'])}, Total: {len(X)}")
 
-    return splits
+    print("[INFO] Calculating pixel-wise class distribution for weighting...")
+    train_ds = GoogleEmbedDataset(splits["train"], check_files=True)
+    pixel_counts = np.zeros(num_classes, dtype=np.int64)
+    for i in tqdm(range(len(train_ds)), desc="Counting pixels"):
+        _, lbl = train_ds[i]
+        for c in range(num_classes):
+            pixel_counts[c] += torch.sum(lbl == c).item()
 
+    pixel_path = os.path.join(input_dir, f"weights_{timestamp}_{split_hash}_pixels.npy")
+    np.save(pixel_path, pixel_counts)
+    print(f"[INFO] Saved pixel counts to {pixel_path}")
+    return splits, pixel_counts
 
-# ========= CLI entry point ==========
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
