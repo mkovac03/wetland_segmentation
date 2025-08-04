@@ -121,8 +121,8 @@ n_classes = config["num_classes"]
 
 # ========= Dataset =========
 train_transform = RandomAugment(p=0.5)
-train_ds = GoogleEmbedDataset(splits["train"], transform=train_transform, check_files=True, num_classes=n_classes)
-val_ds   = GoogleEmbedDataset(splits["val"], check_files=True, num_classes=n_classes)
+train_ds = GoogleEmbedDataset(splits["train"], transform=train_transform, check_files=False, num_classes=n_classes)
+val_ds   = GoogleEmbedDataset(splits["val"], check_files=False, num_classes=n_classes)
 
 print(f"[INFO] Loaded {len(train_ds)} training and {len(val_ds)} validation samples.")
 if len(train_ds) == 0 or len(val_ds) == 0:
