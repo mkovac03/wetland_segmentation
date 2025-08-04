@@ -52,7 +52,7 @@ splitting:
   val_ratio: 0.1
   test_ratio: 0.1
   seed: 42
-  entropy_percentile: 100        # Keep top 80% by entropy
+  entropy_percentile: 100
   max_training_tiles: 5000
   stratify_by_utm: true
   utm_sampling_strategy: "equal"  # or "proportional"
