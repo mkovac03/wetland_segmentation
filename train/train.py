@@ -87,7 +87,11 @@ def get_split_hash(cfg):
         "test_ratio": split_cfg.get("test_ratio", 0.1),
         "background_threshold": split_cfg.get("background_threshold", 0.9),
         "seed": split_cfg.get("seed", 42),
-        "num_classes": cfg["num_classes"]
+        "num_classes": cfg["num_classes"],
+        "max_training_tiles": split_cfg.get("max_training_tiles", None),
+        "entropy_percentile": split_cfg.get("entropy_percentile", None),
+        "stratify_by_utm": split_cfg.get("stratify_by_utm", False),
+        "utm_sampling_strategy": split_cfg.get("utm_sampling_strategy", "equal")
     }, sort_keys=True)
     return hashlib.md5(hash_input.encode()).hexdigest()[:8]
 

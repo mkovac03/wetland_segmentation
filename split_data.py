@@ -21,7 +21,11 @@ def get_split_hash(cfg):
         "test_ratio": split_cfg.get("test_ratio", 0.1),
         "background_threshold": split_cfg.get("background_threshold", 0.9),
         "seed": split_cfg.get("seed", 42),
-        "num_classes": cfg["num_classes"]
+        "num_classes": cfg["num_classes"],
+        "max_training_tiles": split_cfg.get("max_training_tiles", None),
+        "entropy_percentile": split_cfg.get("entropy_percentile", None),
+        "stratify_by_utm": split_cfg.get("stratify_by_utm", False),
+        "utm_sampling_strategy": split_cfg.get("utm_sampling_strategy", "equal")
     }, sort_keys=True)
     return hashlib.md5(hash_input.encode()).hexdigest()[:8]
 
@@ -54,39 +58,61 @@ def generate_splits_and_weights(config):
     if len(file_list) == 0:
         raise RuntimeError(f"No input .npy tiles found in {input_dir}")
 
-    print("[INFO] Filtering and analyzing label content for each tile...")
-    X_full, Y_full, E_full, U_full = [], [], [], []
-    for base in tqdm(file_list):
-        lbl_path = base + "_lbl.npy"
-        lbl = np.load(lbl_path)
-        total = lbl.size
-        bg_pixels = np.sum(lbl == background_class)
-        ignore_pixels = np.sum(lbl == ignore_index)
-        bg_ratio = bg_pixels / (total - ignore_pixels + 1e-6)
-        water_pixels = np.sum(lbl == 10)
-        water_ratio = water_pixels / (total - ignore_pixels + 1e-6)
+    # Try to load cached filtered file list
+    intermediate_path = os.path.join(input_dir, f"filtered_{timestamp}_{split_hash}.json")
+    if os.path.exists(intermediate_path):
+        print(f"[INFO] Found cached filtered tile list: {intermediate_path}. Loading...")
+        with open(intermediate_path, "r") as f:
+            filtered_info = json.load(f)
+        X_full = filtered_info["X_full"]
+        Y_full = [np.array(y) for y in filtered_info["Y_full"]]
+        E_full = filtered_info["E_full"]
+        U_full = filtered_info["U_full"]
+    else:
+        print("[INFO] Filtering and analyzing label content for each tile...")
+        X_full, Y_full, E_full, U_full = [], [], [], []
+        for base in tqdm(file_list):
+            lbl_path = base + "_lbl.npy"
+            lbl = np.load(lbl_path)
+            total = lbl.size
+            bg_pixels = np.sum(lbl == background_class)
+            ignore_pixels = np.sum(lbl == ignore_index)
+            bg_ratio = bg_pixels / (total - ignore_pixels + 1e-6)
+            water_pixels = np.sum(lbl == 10)
+            water_ratio = water_pixels / (total - ignore_pixels + 1e-6)
 
-        if bg_ratio > bg_threshold or water_ratio > 0.9:
-            continue
+            if bg_ratio > bg_threshold or water_ratio > 0.9:
+                continue
 
-        lbl_flat = lbl[lbl != ignore_index]
-        counts = np.bincount(lbl_flat, minlength=num_classes)
-        probs = counts / (counts.sum() + 1e-8)
-        entropy = -np.sum(probs * np.log2(probs + 1e-8))
+            lbl_flat = lbl[lbl != ignore_index]
+            counts = np.bincount(lbl_flat, minlength=num_classes)
+            probs = counts / (counts.sum() + 1e-8)
+            entropy = -np.sum(probs * np.log2(probs + 1e-8))
 
-        class_presence = np.zeros(num_classes, dtype=int)
-        for c in range(num_classes):
-            if counts[c] > 0:
-                class_presence[c] = 1
+            class_presence = np.zeros(num_classes, dtype=int)
+            for c in range(num_classes):
+                if counts[c] > 0:
+                    class_presence[c] = 1
 
-        utm = extract_utm_zone(base)
-        X_full.append(base)
-        Y_full.append(class_presence)
-        E_full.append(entropy)
-        U_full.append(utm)
+            utm = extract_utm_zone(base)
+            X_full.append(base)
+            Y_full.append(class_presence)
+            E_full.append(entropy)
+            U_full.append(utm)
 
-    if len(X_full) == 0:
-        raise RuntimeError("No tiles left after background filtering.")
+        if len(X_full) == 0:
+            raise RuntimeError("No tiles left after background filtering.")
+
+        # Save intermediate
+        filtered_info = {
+            "X_full": X_full,
+            "Y_full": [y.tolist() for y in Y_full],
+            "E_full": E_full,
+            "U_full": U_full
+        }
+        with open(intermediate_path, "w") as f:
+            json.dump(filtered_info, f, indent=2)
+        print(f"[INFO] Saved filtered tile info to {intermediate_path}")
 
     tiles_by_utm = defaultdict(list)
     for base, ent, cls, utm in zip(X_full, E_full, Y_full, U_full):
