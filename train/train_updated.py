@@ -14,13 +14,13 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from PIL import Image
 import matplotlib
-matplotlib.use("Agg")  # Prevent GUI backend issues on headless/server mode
-import matplotlib.patches as mpatches  # add this to the top of your script
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_tensor
 import hashlib
 import subprocess
 import datetime
+import re
 
 from data.dataset import GoogleEmbedDataset
 from data.transform import RandomAugment
@@ -53,17 +53,13 @@ def restart_tensorboard(logdir, port=6006):
     except Exception as e:
         print(f"[WARN] Failed to restart TensorBoard: {e}")
 
-# ========= Crash Debugging =========
 print("[DEBUG] CUDA devices available:", torch.cuda.device_count())
 print("[DEBUG] CUDA memory allocated (MB):", torch.cuda.memory_allocated() / 1024**2)
 print("[DEBUG] CUDA memory reserved (MB):", torch.cuda.memory_reserved() / 1024**2)
-
 subprocess.run(["nvidia-smi"])
-
 print(torch.cuda.get_device_name(0))
 print("CUDA available:", torch.cuda.is_available())
 
-# ========= Load config =========
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="configs/config.yaml")
 parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
@@ -73,6 +69,9 @@ with open(args.config, "r") as f:
     config = yaml.safe_load(f)
 
 timestamp = os.path.basename(config["processed_dir"])
+epsg_match = re.search(r"epsg(326\d{2})", timestamp)
+zone_id = epsg_match.group(1) if epsg_match else "unknown"
+print(f"[INFO] Starting training for EPSG zone: {zone_id}")
 
 if "{now}" in config["output_dir"]:
     config["output_dir"] = config["output_dir"].replace("{now}", timestamp)
@@ -91,7 +90,6 @@ def get_split_hash(cfg):
     }, sort_keys=True)
     return hashlib.md5(hash_input.encode()).hexdigest()[:8]
 
-# ========= Load splits =========
 split_hash = get_split_hash(config)
 config["splits_path"] = f"data/splits/splits_{timestamp}_{split_hash}.json"
 
@@ -101,15 +99,13 @@ if not os.path.exists(config["splits_path"]):
 with open(config["splits_path"], "r") as f:
     splits = json.load(f)
 
-# ========= TensorBoard =========
 if config.get("tensorboard", {}).get("restart", True):
     port = config.get("tensorboard", {}).get("port", 6006)
     restart_tensorboard(logdir=config["output_dir"], port=port)
 
-# ========= TensorBoard writer path =========
 os.makedirs(config["output_dir"], exist_ok=True)
-run_name = os.path.basename(config["output_dir"])
-writer = SummaryWriter(log_dir=config["output_dir"])
+run_name = os.path.basename(config["output_dir"]) + f"_EPSG{zone_id}"
+writer = SummaryWriter(log_dir=os.path.join("outputs", "tensorboard", run_name))
 
 # ========= Dataset =========
 train_transform = RandomAugment(p=0.5)
@@ -302,30 +298,19 @@ for epoch in range(config["training"]["epochs"]):
                 with torch.no_grad():
                     pred = model(sample_x).argmax(1).squeeze().cpu()
 
-                # Show selected embedding bands A01, A16, A09 = [0, 15, 8]
-                vis_bands = [0, 15, 8]
-                vis_img = sample_x_vis[vis_bands]
+                vis_img = sample_x_vis[0:3]  # use first 3 channels for RGB-like view
                 vis_img = (vis_img - vis_img.min()) / (vis_img.max() - vis_img.min())
-                vis_img = vis_img.permute(1, 2, 0).numpy()  # HWC
+                vis_img = vis_img.permute(1, 2, 0).numpy()  # HWC for imshow
 
                 axs[i, 0].imshow(vis_img)
-                axs[i, 0].set_title("Google Embeddings (A01, A16, A09)")
-
+                axs[i, 0].set_title("Google Embeddings (1-2-3)")
                 axs[i, 1].imshow(sample_y, cmap="tab20")
-                axs[i, 1].set_title("Label")
-
+                axs[i, 1].set_title("Ground Truth")
                 axs[i, 2].imshow(pred, cmap="tab20")
                 axs[i, 2].set_title("Prediction")
 
                 for j in range(3):
                     axs[i, j].axis("off")
-
-            # Add legend to the last prediction panel
-            class_colors = plt.cm.tab20(np.linspace(0, 1, config["num_classes"]))
-            class_labels = label_names if label_names else {i: f"Class {i}" for i in range(config["num_classes"])}
-            legend_patches = [mpatches.Patch(color=class_colors[i], label=class_labels.get(str(i), f"Class {i}"))
-                              for i in range(config["num_classes"])]
-            axs[-1, 2].legend(handles=legend_patches, loc='upper right', fontsize='small', frameon=False)
 
             plt.tight_layout()
             buf = io.BytesIO()
@@ -334,7 +319,7 @@ for epoch in range(config["training"]["epochs"]):
             img = Image.open(buf)
             img_tensor = to_tensor(img)
             writer.add_image("Validation/Pred_vs_GT_Grid", img_tensor, global_step=epoch)
-            plt.close("all")
+            plt.close("all")  # Close all figures
             for ax in axs.flat:
                 ax.clear()
             del fig, axs, vis_img, sample_x, sample_y, sample_x_vis, pred, img_tensor, img

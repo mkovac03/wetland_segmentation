@@ -1,16 +1,21 @@
 # File: configs/config.yaml
 
-input_dir: "/media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_01_22"
-processed_dir: "data/processed/{now}"
-splits_path: "data/splits/splits_{now}.json"
-output_dir: "/home/lkm413/wetland_segmentation/outputs/{now}"
+input_dirs:
+  - /media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_01_22
+  - /media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_23_44
+  - /media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_45_63
+
+processed_dir: data/processed/{now}
+splits_path: data/splits/splits_{now}.json
+output_dir: /home/lkm413/wetland_segmentation/outputs/{now}
 crs_target: "EPSG:3035"
 
 patch_size: 512
 stride: 512
 batch_size: 16
 num_classes: 13
-input_channels: 22
+input_channels: 64
+band_offset: 2  # Skip label band (index 1), start at band 2 (index 1 in rasterio)
 
 model:
   encoder: resnet34
@@ -52,7 +57,7 @@ splitting:
   val_ratio: 0.1
   test_ratio: 0.1
   seed: 42
-  entropy_percentile: 100        # Keep top 80% by entropy
+  entropy_percentile: 80
   max_training_tiles: 5000
   stratify_by_utm: true
   utm_sampling_strategy: "equal"  # or "proportional"
@@ -68,6 +73,3 @@ logging:
 
 debug:
   monitor_memory: true
-
-band_offset: 2  # Starting from band 2 = index 1 in rasterio
-
