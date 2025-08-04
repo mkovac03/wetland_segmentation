@@ -15,32 +15,39 @@ class GoogleEmbedDataset(Dataset):
         """
         Args:
             file_list (List[str]): Base paths (excluding _img.npy/_lbl.npy) to samples
-            transform (callable): Transform that takes (img, lbl) and returns (img, lbl)
-            check_files (bool): If True, skip bad files or out-of-range labels
-            num_classes (int): Used to filter invalid label values
+            transform (callable): Optional transform applied to input image and label
+            check_files (bool): If True, performs label range validation
+            num_classes (int): Total number of semantic classes (excluding 255)
         """
         self.transform = transform or RandomAugment()
         self.num_classes = num_classes or 13
+        self.file_list = []
 
         if check_files:
             print("[INFO] Checking for invalid label values...")
-            clean_list = []
             for path in tqdm(file_list, desc="Validating labels"):
                 lbl_path = path + "_lbl.npy"
-                if not os.path.exists(path + "_img.npy") or not os.path.exists(lbl_path):
+                try:
+                    lbl = np.load(lbl_path)
+                    invalid_mask = (lbl != 255) & ((lbl < 0) | (lbl >= self.num_classes))
+                    if np.any(invalid_mask):
+                        bad_vals = np.unique(lbl[invalid_mask])
+                        print(f"[DEBUG] {lbl_path} → invalid labels: {bad_vals}")
+                        print(f"[WARN] Skipping {path} — label out of range (excluding 255)")
+                        continue
+                except Exception as e:
+                    print(f"[ERROR] Could not load {lbl_path}: {e}")
                     continue
-                lbl = np.load(lbl_path)
-                if np.any((lbl < 0) | (lbl >= self.num_classes)):
-                    print(f"[WARN] Skipping {path} — label out of range")
-                    continue
-                clean_list.append(path)
-            self.file_list = clean_list
+
+                self.file_list.append(path)
             print(f"[INFO] {len(self.file_list)} valid tiles retained.")
         else:
-            self.file_list = [
-                base for base in file_list
-                if os.path.exists(base + "_img.npy") and os.path.exists(base + "_lbl.npy")
-            ]
+            # Only check existence
+            for base in file_list:
+                img_path = base + "_img.npy"
+                lbl_path = base + "_lbl.npy"
+                if os.path.exists(img_path) and os.path.exists(lbl_path):
+                    self.file_list.append(base)
 
         if not self.file_list:
             raise RuntimeError("GoogleEmbedDataset: No valid .npy file pairs found.")
@@ -50,14 +57,11 @@ class GoogleEmbedDataset(Dataset):
 
     def __getitem__(self, idx):
         base = self.file_list[idx]
-        img = np.load(base + '_img.npy')  # [C, H, W]
-        lbl = np.load(base + '_lbl.npy')  # [H, W]
+        img = np.load(base + "_img.npy")  # shape: [C, H, W]
+        lbl = np.load(base + "_lbl.npy")  # shape: [H, W]
 
         if img.shape[1:] != lbl.shape:
-            raise ValueError(f"Shape mismatch at {base}: image {img.shape}, label {lbl.shape}")
-
-        if self.num_classes is not None and np.any((lbl < 0) | (lbl >= self.num_classes)):
-            raise ValueError(f"[ERROR] Invalid label values in {base}")
+            raise ValueError(f"[ERROR] Shape mismatch at {base}: image {img.shape}, label {lbl.shape}")
 
         img = torch.from_numpy(img).float()
         lbl = torch.from_numpy(lbl).long()
@@ -66,3 +70,21 @@ class GoogleEmbedDataset(Dataset):
             img, lbl = self.transform(img, lbl)
 
         return img, lbl
+
+
+def get_file_list(processed_dir):
+    """
+    List all valid image/label base filenames from a processed directory.
+
+    Args:
+        processed_dir (str): Directory containing *_img.npy and *_lbl.npy pairs
+
+    Returns:
+        List[str]: Base paths for all valid image/label pairs
+    """
+    files = [
+        os.path.join(processed_dir, f[:-8])
+        for f in os.listdir(processed_dir)
+        if f.endswith('_img.npy') and os.path.exists(os.path.join(processed_dir, f[:-8] + '_lbl.npy'))
+    ]
+    return sorted(files)
