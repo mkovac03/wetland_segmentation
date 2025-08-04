@@ -116,67 +116,58 @@ os.makedirs(config["output_dir"], exist_ok=True)
 run_name = os.path.basename(config["output_dir"])
 writer = SummaryWriter(log_dir=config["output_dir"])
 
+# ========= Class weights and sample weights =========
+n_classes = config["num_classes"]
+
 # ========= Dataset =========
 train_transform = RandomAugment(p=0.5)
-train_ds = GoogleEmbedDataset(splits["train"], transform=train_transform)
-val_ds   = GoogleEmbedDataset(splits["val"])
+train_ds = GoogleEmbedDataset(splits["train"], transform=train_transform, check_files=True, num_classes=n_classes)
+val_ds   = GoogleEmbedDataset(splits["val"], check_files=True, num_classes=n_classes)
 
 print(f"[INFO] Loaded {len(train_ds)} training and {len(val_ds)} validation samples.")
 if len(train_ds) == 0 or len(val_ds) == 0:
     raise RuntimeError("Train or validation dataset is empty.")
-
-# ========= Class weights and sample weights =========
-n_classes = config["num_classes"]
-print("→ Calculating pixel-wise class distribution for weighting...")
 
 weights_dir = os.path.join(config["output_dir"], "weights")
 os.makedirs(weights_dir, exist_ok=True)
 
 weights_path = os.path.join(weights_dir, f"weights_{timestamp}_{split_hash}.npz")
 pixel_path   = os.path.join(weights_dir, f"weights_{timestamp}_{split_hash}_pixels.npy")
-os.makedirs(weights_dir, exist_ok=True)
 
 # === 1. Pixel counts ===
 if os.path.exists(pixel_path):
-    print(f"[INFO] Found pixel counts at: {pixel_path}")
-    label_counts = np.load(pixel_path)
+    try:
+        label_counts = np.load(pixel_path)
+        if not isinstance(label_counts, np.ndarray) or label_counts.shape[0] != n_classes:
+            raise ValueError(f"Invalid shape: {label_counts.shape}")
+        print(f"[INFO] Loaded pixel counts from: {pixel_path}")
+    except Exception as e:
+        raise RuntimeError(f"[ERROR] Expected pixel count file {pixel_path} to exist, but failed to load: {e}")
 else:
-    print("→ Computing pixel-wise label counts...")
-    label_counts = np.zeros(n_classes, dtype=np.int64)
-    for base in tqdm(splits["train"], desc="Counting pixels"):
-        lbl_path = base + "_lbl.npy"
-        label = np.load(lbl_path, mmap_mode="r")
-        mask = (label != 255) & (label < n_classes)
-        valid = label[mask]
-        count = np.bincount(valid.flatten(), minlength=n_classes)
-        label_counts[:len(count)] += count
-    np.save(pixel_path, label_counts)
-    print(f"[INFO] Saved pixel counts to: {pixel_path}")
+    raise FileNotFoundError(f"[ERROR] Pixel count file not found: {pixel_path}. Expected this to be created during split_data step.")
 
-# === 2. Class/sample weights ===
-if os.path.exists(weights_path):
-    print(f"[INFO] Found class/sample weights at: {weights_path}")
-    data = np.load(weights_path)
-    class_weights = data["class_weights"]
-    sample_weights = data["sample_weights"]
-else:
-    print("→ Computing class/sample weights...")
-    class_weights = 1.0 / (label_counts + 1e-6)
-    class_weights *= (n_classes / class_weights.sum())
+weights_path = os.path.join(weights_dir, f"weights_{timestamp}_{split_hash}.npz")
+if not os.path.exists(weights_path):
+    raise FileNotFoundError(f"[ERROR] Class/sample weights file not found: {weights_path}")
 
-    sample_weights = []
-    for base in tqdm(splits["train"], desc="Computing sample weights"):
-        lbl_path = base + "_lbl.npy"
-        label = np.load(lbl_path, mmap_mode="r").flatten()
-        label = label[(label != 255) & (label < len(class_weights))]
-        weight = np.mean(class_weights[label]) if len(label) > 0 else 0.0
-        sample_weights.append(weight)
+data = np.load(weights_path)
+class_weights = data["class_weights"]
+sample_weights = data["sample_weights"]
+print(f"[INFO] Loaded weights from: {weights_path}")
 
-    np.savez(weights_path, class_weights=class_weights, sample_weights=sample_weights)
-    print(f"[INFO] Saved class/sample weights to: {weights_path}")
+if len(sample_weights) != len(train_ds.file_list):
+    print(f"[WARN] Reindexing sample_weights: original={len(sample_weights)}, filtered={len(train_ds.file_list)}")
+    # Assume weights are stored aligned with unfiltered tile list
+    # We'll match filenames
+    with open(config["splits_path"], "r") as f:
+        full_splits = json.load(f)
+    all_train_files = full_splits["train"]
 
+    tile_to_weight = dict(zip(all_train_files, sample_weights))
+    sample_weights = [tile_to_weight[fp] for fp in train_ds.file_list if fp in tile_to_weight]
+    if len(sample_weights) != len(train_ds.file_list):
+        raise RuntimeError("Failed to match sample weights to filtered train file list.")
 
-assert len(sample_weights) == len(train_ds.file_list), "Mismatch between weights and dataset entries"
 rare_class_boost = config.get("sampling", {}).get("rare_class_boost", 1.5)
 
 tile_scores = np.array(sample_weights)
@@ -234,7 +225,6 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
 )
 
 log_file = open(os.path.join(config["output_dir"], "training_log.txt"), "a")
-
 save_every = config.get("save_every", 5)
 
 for epoch in range(config["training"]["epochs"]):
@@ -254,7 +244,9 @@ for epoch in range(config["training"]["epochs"]):
             if valid_mask.sum() == 0:
                 continue  # skip empty batch
 
-            loss = ft_loss(out, y) + ce_loss(out, y)
+            y_valid = y[valid_mask]
+            out_valid = out.permute(0, 2, 3, 1)[valid_mask]  # match shape [N, C]
+            loss = ft_loss(out, y) + ce_loss(out_valid, y_valid)
 
         scaler.scale(loss).backward()
         clip_val = config.get("gradient_clipping", 1.0)  # Default to 1.0 if not specified

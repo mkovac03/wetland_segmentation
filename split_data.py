@@ -33,8 +33,59 @@ def extract_utm_zone(path):
     match = re.search(r"326\d{2}", path)
     return match.group(0) if match else "unknown"
 
+def save_or_load_pixel_counts(train_split, output_dir, num_classes, timestamp, split_hash):
+    pixel_path = os.path.join(output_dir, "weights", f"weights_{timestamp}_{split_hash}_pixels.npy")
+    os.makedirs(os.path.dirname(pixel_path), exist_ok=True)
+
+    if os.path.exists(pixel_path):
+        try:
+            pixel_counts = np.load(pixel_path)
+            if isinstance(pixel_counts, np.ndarray) and pixel_counts.shape[0] == num_classes:
+                print(f"[INFO] Loaded pixel counts from {pixel_path}")
+                return pixel_counts
+            else:
+                print(f"[WARN] Invalid pixel count shape. Recomputing.")
+        except Exception as e:
+            print(f"[WARN] Failed to load pixel counts. Recomputing. Reason: {e}")
+
+    print("[INFO] Calculating pixel-wise class distribution for weighting...")
+    train_ds = GoogleEmbedDataset(train_split, check_files=True)
+    pixel_counts = np.zeros(num_classes, dtype=np.int64)
+    for i in tqdm(range(len(train_ds)), desc="Counting pixels"):
+        _, lbl = train_ds[i]
+        for c in range(num_classes):
+            pixel_counts[c] += torch.sum(lbl == c).item()
+
+    np.save(pixel_path, pixel_counts)
+    print(f"[INFO] Saved pixel counts to {pixel_path}")
+    return pixel_counts
+
+def save_class_and_sample_weights(train_split, pixel_counts, output_dir, num_classes, timestamp, split_hash):
+    weights_path = os.path.join(output_dir, "weights", f"weights_{timestamp}_{split_hash}.npz")
+    os.makedirs(os.path.dirname(weights_path), exist_ok=True)
+
+    if os.path.exists(weights_path):
+        print(f"[INFO] Found class/sample weights at: {weights_path}")
+        return
+
+    print("→ Computing class/sample weights...")
+    class_weights = 1.0 / (pixel_counts + 1e-6)
+    class_weights *= (num_classes / class_weights.sum())
+
+    sample_weights = []
+    for base in tqdm(train_split, desc="Computing sample weights"):
+        lbl_path = base + "_lbl.npy"
+        label = np.load(lbl_path, mmap_mode="r").flatten()
+        label = label[(label != 255) & (label < len(class_weights))]
+        weight = np.mean(class_weights[label]) if len(label) > 0 else 0.0
+        sample_weights.append(weight)
+
+    np.savez(weights_path, class_weights=class_weights, sample_weights=sample_weights)
+    print(f"[INFO] Saved class/sample weights to {weights_path}")
+
 def generate_splits_and_weights(config):
     input_dir = config["processed_dir"].rstrip("/")
+    output_dir = config["output_dir"].rstrip("/")
     num_classes = config["num_classes"]
     split_hash = get_split_hash(config)
     timestamp = os.path.basename(input_dir)
@@ -114,6 +165,7 @@ def generate_splits_and_weights(config):
             json.dump(filtered_info, f, indent=2)
         print(f"[INFO] Saved filtered tile info to {intermediate_path}")
 
+    # Stratified tile selection
     tiles_by_utm = defaultdict(list)
     for base, ent, cls, utm in zip(X_full, E_full, Y_full, U_full):
         tiles_by_utm[utm].append((base, ent, cls))
@@ -172,17 +224,10 @@ def generate_splits_and_weights(config):
     print(f"[INFO] Saved splits to {split_path}")
     print(f"[INFO] Train: {len(splits['train'])}, Val: {len(splits['val'])}, Test: {len(splits['test'])}, Total: {len(X)}")
 
-    print("[INFO] Calculating pixel-wise class distribution for weighting...")
-    train_ds = GoogleEmbedDataset(splits["train"], check_files=True)
-    pixel_counts = np.zeros(num_classes, dtype=np.int64)
-    for i in tqdm(range(len(train_ds)), desc="Counting pixels"):
-        _, lbl = train_ds[i]
-        for c in range(num_classes):
-            pixel_counts[c] += torch.sum(lbl == c).item()
+    # Save pixel counts and class/sample weights
+    pixel_counts = save_or_load_pixel_counts(splits["train"], output_dir, num_classes, timestamp, split_hash)
+    save_class_and_sample_weights(splits["train"], pixel_counts, output_dir, num_classes, timestamp, split_hash)
 
-    pixel_path = os.path.join(input_dir, f"weights_{timestamp}_{split_hash}_pixels.npy")
-    np.save(pixel_path, pixel_counts)
-    print(f"[INFO] Saved pixel counts to {pixel_path}")
     return splits, pixel_counts
 
 if __name__ == "__main__":
