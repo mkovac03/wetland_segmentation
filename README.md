@@ -1,13 +1,10 @@
 # Wetland Segmentation with ResUNet-ViT
 
+![Model Architecture](architecture.png)
+
 This project performs high-resolution semantic segmentation of wetlands across Europe using a hybrid CNN-ViT architecture trained on 10-meter satellite imagery. It addresses the challenge of weak supervision from coarse-resolution 100-meter labels by applying label-aware loss weighting and boundary enhancement strategies to sharpen spatial accuracy at the native 10 m scale. The dataset exhibits strong class imbalance, which is handled through a combination of focal and class-weighted loss functions, improving minority class detection. It uses weak supervision from 100-meter wetland type labels and powerful spectral-temporal embeddings from Google’s Earth Engine dataset.
 
 ---
-
-![Model Overview](architecture.png)
-
-<div style="display: flex; align-items: flex-start; gap: 20px;">
-  <div style="flex: 1;">
 
 ## 🌍 Datasets
 
@@ -15,98 +12,55 @@ This project performs high-resolution semantic segmentation of wetlands across E
 
 * **Source**: European Environment Agency (EEA)
 * **Dataset**: [Wetland Types Dataset on EEA DataHub](https://www.eea.europa.eu/en/datahub/datahubitem-view/b9399908-557a-47a8-954a-958dabeaf1b6)
-* **Coverage**: Europe-wide (all EU member states + cooperating regions)
-* **Format**: Rasterized to 100-meter resolution (FAO Level-3 Wetland Types)
-* **Wetland Classes**:
-
-  * No Wetland
-  * Rice Fields
-  * Riparian, fluvial and swamp broadleaved forest
-  * Riparian, fluvial and swamp coniferous forest
-  * Riparian, fluvial and mixed forest
-  * Managed or grazed wet meadow or pasture
-  * Natural seasonally or permanently wet grasslands
-  * Wet heaths
-  * Riverine and fen scrubs
-  * Beaches, dunes, sand
-  * Inland marshes
-  * Open mires
-  * Salt marshes
-  * Coastal lagoons
-  * River estuaries and estuarine waters of deltas
-  * Coastal saltpans (highly artificial salinas)
-  * Intertidal flats
-  * Surface water
+* **Coverage**: Europe-wide (EU countries + cooperating regions)
+* **Resolution**: Rasterized to 100 m
+* **Classes**: 18 original FAO Level-3 wetland types, remapped to 13 categories
 
 ### 🛋️ Input Features
 
 * **Source**: [Google Earth Engine – Satellite Embedding v1](https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL)
-* **Description**:
-
-  * Global 64-band spectral-temporal embedding trained via contrastive learning
-  * Derived from Sentinel-1, Sentinel-2, and Landsat time series
+* **Type**: Spectral-temporal embeddings learned from Sentinel-1, Sentinel-2, Landsat, as described in Liu et al. (2022) *AlphaEarth: Accurate Land Cover Mapping via Scalable Vision Transformers* [arXiv:2507.22291v1](https://arxiv.org/abs/2507.22291)
 * **Resolution**: 10 m
-* **Coverage**: Global
-* **Selected Features**:
-
-  * 29 pre-selected image channels
-  * Selected based on mean feature importance across experiments
+* **Bands Used**: 22 spectral-temporal bands (starting from Band 2)
 
 ---
 
 ## 📦 Project Structure
 
 ```bash
-├── configs/
-│   └── config.yaml              # Main configuration file (with {now} placeholders)
-├── data/
-│   ├── preprocess.py            # Reprojects, resamples, and remaps raster inputs
-│   ├── split_data.py            # Generates train/val/test splits
-│   ├── dataset.py               # PyTorch dataset class (loads .npy tiles)
-│   └── transform.py             # Random flip/rotate augmentation
-├── models/
-│   └── resunet_vit.py           # Hybrid ResNet+ViT architecture
-├── train/
-│   ├── train.py                 # Main training script
-│   ├── metrics.py               # Computes mIoU, F1, etc.
-│   └── losses/
-│       ├── focal_tversky.py     # Custom Focal + Tversky loss with boundary masking
-│       └── soft_boundary_dice.py# Optional soft boundary-aware Dice loss
-├── predict/
-│   ├── inference.py             # Patch-based inference with label remapping
-│   └── evaluate_predictions.py  # Confusion matrix, metrics CSV
-├── scripts/
-│   ├── run_train.sh             # Bash script to run preprocessing + training
-│   ├── build_vrt.py             # Combines predicted TIFFs into a VRT mosaic
-│   └── visualize_predictions.py # Plots input–GT–prediction triplets
-├── outputs/
-│   └── ...                      # Saved models, logs, predictions
+├── configs/                    # YAML configuration files
+├── data/                       # Preprocessing, splitting, datasets, transforms
+├── models/                     # ResUNet-ViT hybrid architecture
+├── train/                      # Training logic, metrics, loss functions
+├── predict/                    # Inference & evaluation
+├── scripts/                    # Bash entrypoints, post-processing tools
+├── outputs/                    # Saved checkpoints, logs, predictions
 ```
 
 ---
 
 ## 🚀 Quick Start
 
-1. **Clone the repo**
+1. **Clone repository**:
 
 ```bash
 git clone https://github.com/mkovac03/wetland-segmentation.git
 cd wetland-segmentation
 ```
 
-2. **Install dependencies**
+2. **Install requirements**:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. **Run training**
+3. **Start training**:
 
 ```bash
 bash run_train.sh
 ```
 
-4. **Run inference**
+4. **Run inference**:
 
 ```bash
 python -m predict.inference --timestamp <TIMESTAMP>
@@ -116,69 +70,75 @@ python -m predict.inference --timestamp <TIMESTAMP>
 
 ## 🧠 Model Architecture
 
-The model is a **ResNet-UNet-ViT hybrid** that fuses convolutional and attention-based representations for better segmentation of wetlands. It is specifically designed to handle high-dimensional input features and weak supervision labels at fine spatial resolution, with an emphasis on both local texture and global spatial context.
+The segmentation model is a **ResNet-UNet-ViT hybrid**, purpose-built for **wetland mapping with high-dimensional satellite embeddings** and **weak supervision**. It integrates:
+
+* **local texture encoding** via convolutional networks
+* **global spatial context** using transformer-based attention
+* **decoder with skip connections** for spatial detail preservation
+
+This architecture excels at fine-resolution segmentation (10m) under coarse or noisy label constraints.
 
 ### 🔧 Key Components
 
-* **Encoder**:
+**Encoder**:
 
-  * Based on ResNet-34 (optional ImageNet pretraining)
-  * Modified first convolution to accept 29-band embeddings (e.g., temporal and spectral Earth Engine bands)
-  * Sequential feature extraction through residual blocks and max pooling
+* Based on a ResNet-34 backbone
+* Accepts 22 input channels (from Band 2 onward)
 
-* **Transformer Bottleneck**:
+**Transformer Bottleneck**:
 
-  * A lightweight Vision Transformer (ViT) bottleneck to capture long-range dependencies
-  * Operates on a 16×16 feature map, partitioned into 8×8 tokens using a patch size of 2
-  * Configured with 4 transformer layers and 8 attention heads
-  * Embedding dimension: 512
+* 4 attention layers, 8 heads, 512-dimensional embeddings
+* Operates on 16×16 feature maps with patch size 2
 
-* **Decoder**:
+**Decoder**:
 
-  * UNet-style upsampling pathway that mirrors the encoder
-  * Skip connections between encoder and decoder levels enable spatial detail recovery
-  * Each decoder block performs upsampling (via `ConvTranspose2d`) followed by a ReLU activation
-  * The final segmentation map is produced via a 1×1 convolution layer and bilinear upsampling to match the original input resolution
+* Upsampling path with skip connections
+* Final segmentation output matches 512×512 patch size
+
+---
+
+## 🗂️ Tile Preparation & Label Mapping
+
+Raw multi-band satellite images are reprojected, tiled into fixed-size patches, and aligned with remapped label masks. Background-heavy tiles are filtered out, and invalid classes are masked. All preprocessing logic, including CRS, patch size, stride, and label handling, is configured externally.
 
 ---
 
 ## 🧪 Data Augmentation
 
-  * Random horizontal & vertical flips
-  * Random 90°, 180°, 270° rotations
-  * Applied only during training, not validation/test
+Augmentations applied during training include:
+
+* Horizontal and vertical flips
+* 90°, 180°, 270° rotations
+* Channel dropout (random bands masked)
+* Brightness/contrast jitter, Gaussian noise, blur
 
 ---
 
-## 🛠️ Loss Function
+## 🔍 Sampling Strategy & Class Balancing
 
-* **Focal Loss**:
-
-  * Downweights easy negatives and emphasizes hard examples using tunable α-γ parameters
-  * Includes dynamic class weighting and optional boundary masking for edge precision
-
-* **Tversky Loss**:
-
-  * Generalized Dice variant that handles class imbalance with adjustable α/β weighting
-  * Boosts recall for underrepresented and small wetland types
-
-* **Optional Boundary Dice Loss**:
-
-  * Sharpens predictions around fuzzy class edges using distance-transformed masks
-
-* **Combined Objective**:
-
-  * A weighted sum of Focal, Tversky, and optionally Boundary Dice losses
-  * Mitigates label imbalance and refines coarse-resolution supervision
+Tile selection follows a stratified and reproducible splitting routine, with configurable ratios, geographic balancing, and optional rare-class boosting. Class imbalance is addressed through weighted sampling and tile reweighting strategies, all controlled via the configuration.
 
 ---
 
-## 📊 Evaluation & Outputs
+## 🛠️ Loss Function Design
 
-* **Metrics**:
+Loss functions combine multiple components to balance class frequencies and improve segmentation quality at boundaries. A focal component emphasizes hard examples, a generalized overlap-based metric manages class imbalance, and an optional boundary-aware term refines edges. All are configurable externally.
 
-  * Per-class and macro F1, mIoU, pixel accuracy
-  * Confusion matrix
+---
+
+## 🚀 Training Pipeline
+
+Training setup—spanning learning schedule, optimization, stopping logic, and logging—is fully defined through configuration. The system supports checkpointing, mixed precision, gradient clipping, and reproducible outputs with timestamped directories and TensorBoard integration.
+
+---
+
+## 📊 Evaluation & Inference
+
+* Evaluation: per-class and macro F1, mIoU, pixel accuracy
+* Checkpoints saved every 5 epochs
+* Best model selected based on validation loss
+* Inference uses sliding window over large tiles, with averaging
+* Outputs include raster predictions and metadata
 
 ---
 
@@ -194,5 +154,5 @@ If you use this in your research, please cite:
 
 For questions or collaboration:
 
-* 🧑‍💻 [Gyula Máté Kovács](https://github.com/mkovac03)
+* 👨‍💻 [Gyula Máté Kovács](https://github.com/mkovac03)
 * 🌍 University of Copenhagen · Global Wetland Center
