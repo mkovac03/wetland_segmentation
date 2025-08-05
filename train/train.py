@@ -345,7 +345,7 @@ for epoch in range(config["training"]["epochs"]):
 
     if epoch % save_every == 0 and is_master_process():
         fp16_weights = convert_to_fp16(model.state_dict())
-        torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_epoch{epoch + 1}_weights.pt"), _use_new_zipfile_serialization=False)
+        torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_ep{epoch + 1}_weights.pt"), _use_new_zipfile_serialization=False)
 
     if epoch == 0:
         torch.cuda.empty_cache()

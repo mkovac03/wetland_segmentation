@@ -21,12 +21,12 @@ model:
   vit_patch_size: 2
 
 training:
-  epochs: 200
+  epochs: 100
   lr: 0.0001
   weight_decay: 0.01
   use_amp: true
   early_stopping_metric: loss  # or "f1"
-  early_stopping_patience: 30
+  early_stopping_patience: 15
   deterministic: false
   scheduler: reduce_on_plateau
   scheduler_patience: 10

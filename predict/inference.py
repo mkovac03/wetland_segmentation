@@ -4,13 +4,14 @@ import json
 import torch
 import argparse
 import numpy as np
-import rasterio
 from tqdm import tqdm
-from rasterio.windows import Window
-from models.resunet_vit import ResNetUNetViT
 import yaml
 import re
 from scipy.special import softmax
+from models.resunet_vit import ResNetUNetViT
+from data.dataset import get_file_list
+import matplotlib.pyplot as plt
+import collections
 
 # ========== Load config ==========
 with open("configs/config.yaml", "r") as f:
@@ -20,78 +21,40 @@ PATCH_SIZE = config["patch_size"]
 STRIDE = config["stride"]
 NUM_CLASSES = config["num_classes"]
 INPUT_CHANNELS = config["input_channels"]
-BASE_DIR = config.get("base_dir", "/media/lkm413/storage1/wetland_segmentation")
-INPUT_DIR = config["input_dir"]
+PROCESSED_DIR = config["processed_dir"]
+OUTPUT_DIR_TEMPLATE = config["output_dir"]
 
 # ========== Argument Parser ==========
 parser = argparse.ArgumentParser()
-parser.add_argument("--timestamp", help="Run timestamp (e.g. 20250715_182612)")
+parser.add_argument("--timestamp", help="Run timestamp (e.g. 20250730_141251)")
 args = parser.parse_args()
 
-# ========== Resolve timestamp ==========
+# ========== Resolve timestamp and paths ==========
 if args.timestamp:
     timestamp = args.timestamp
 else:
-    print("[INFO] No --timestamp provided. Searching for latest valid run...")
-    candidates = glob.glob(os.path.join(BASE_DIR, "outputs", "20*_*"))
-    timestamps = sorted([
-        os.path.basename(p) for p in candidates
-        if os.path.isdir(p) and os.path.exists(os.path.join(p, "training_log.txt"))
-    ])
-    if not timestamps:
-        raise FileNotFoundError("No timestamped run folder with training_log.txt found in outputs/")
-    timestamp = timestamps[-1]
-    print(f"[INFO] Using latest run: {timestamp}")
+    raise ValueError("You must provide --timestamp")
 
-LOG_PATH = os.path.join(BASE_DIR, "outputs", timestamp, "training_log.txt")
-CKPT_DIR = os.path.join(BASE_DIR, "outputs", timestamp)
-OUTPUT_DIR = os.path.join(BASE_DIR, f"outputs/predictions_Denmark2018_{timestamp}")
-
-# ========== Load Label Remap ==========
-with open("data/label_remap.json", "r") as f:
-    inverse_remap = {v: int(k) for k, v in json.load(f).items()}
-
-# ========== SAFETY CHECK ==========
-remapped_class_ids = sorted(inverse_remap.keys())
-print(f"[INFO] Model class indices: {remapped_class_ids}")
-if len(remapped_class_ids) != NUM_CLASSES or max(remapped_class_ids) != NUM_CLASSES - 1:
-    raise ValueError(
-        f"[ERROR] Inconsistent remapping: model expects {NUM_CLASSES} classes, "
-        f"but inverse_remap has keys: {remapped_class_ids}"
-    )
-
-# ========== Load Human-Readable Class Names ==========
-label_names = {}
-try:
-    with open("data/label_remap_longnames.json", "r") as f:
-        label_names = json.load(f)
-except FileNotFoundError:
-    print("[WARNING] label_remap_longnames.json not found. Proceeding without label names.")
+processed_dir = PROCESSED_DIR.format(now=timestamp)
+output_dir = OUTPUT_DIR_TEMPLATE.format(now=timestamp)
+LOG_PATH = os.path.join(output_dir, "best_epoch.txt")
+CKPT_DIR = output_dir
+PRED_OUTPUT_DIR = os.path.join(output_dir, f"predictions_2018_{timestamp}")
 
 # ========== Utilities ==========
-def parse_best_epoch(log_path, fallback_txt_path=None):
-    if fallback_txt_path and os.path.exists(fallback_txt_path):
-        with open(fallback_txt_path, "r") as f:
-            line = f.readline().strip()
-            if "," in line:
-                epoch, f1 = line.split(",")
-                return int(epoch), float(f1)
-
-    best_f1 = -1
-    best_epoch = None
-    with open(log_path, "r") as f:
-        for line in f:
-            parts = line.strip().split(",")
-            if len(parts) >= 5:
-                try:
-                    epoch_num = int(parts[0])
-                    f1_score = float(parts[-1])
-                    if f1_score > best_f1:
-                        best_f1 = f1_score
-                        best_epoch = epoch_num
-                except:
-                    continue
-    return best_epoch, best_f1
+def parse_best_epoch(txt_path):
+    if not os.path.exists(txt_path):
+        return None, None
+    with open(txt_path, "r") as f:
+        line = f.readline().strip()
+        if "," in line:
+            epoch, _ = line.split(",")
+            pattern = f"model_ep{int(epoch)}_weights.pt"
+            candidates = [f for f in os.listdir(CKPT_DIR) if f.startswith("model_") and f.endswith("_weights.pt")]
+            for c in candidates:
+                if pattern in c:
+                    return int(epoch), os.path.join(CKPT_DIR, c)
+    return None, None
 
 def load_model(ckpt_path):
     model = ResNetUNetViT(config).cuda()
@@ -100,126 +63,101 @@ def load_model(ckpt_path):
     model.eval()
     return model
 
+def run_inference(model, input_npy_path, output_tif_path):
+    import rasterio
+    from rasterio.transform import from_origin
 
-def run_inference(model, input_tif, output_tif):
-    with rasterio.open(input_tif) as src:
-        meta = src.meta.copy()
-        meta.update(count=1, dtype='uint8', compress='lzw', nodata=255)
+    img = np.load(input_npy_path)  # shape [C, H, W]
 
-        h, w = src.height, src.width
-        # Compute exact top-left anchors to ensure full coverage
-        y_positions = list(range(0, h - PATCH_SIZE + 1, STRIDE))
-        x_positions = list(range(0, w - PATCH_SIZE + 1, STRIDE))
+    # ========== Preprocess input ==========
+    invalid_mask = img == -32768
+    img[invalid_mask] = 0  # Replace invalid with 0 (safe default)
 
-        if (h - PATCH_SIZE) % STRIDE != 0:
-            y_positions.append(h - PATCH_SIZE)
-        if (w - PATCH_SIZE) % STRIDE != 0:
-            x_positions.append(w - PATCH_SIZE)
+    h, w = img.shape[1], img.shape[2]
+    print(f"[DEBUG] Input stats: shape={img.shape}, min={img.min():.4f}, max={img.max():.4f}, mean={img.mean():.4f}")
 
-        logit_accum = np.zeros((NUM_CLASSES, h, w), dtype=np.float32)
-        weight_map = np.zeros((h, w), dtype=np.float32)
+    logit_accum = np.zeros((NUM_CLASSES, h, w), dtype=np.float32)
+    weight_map = np.zeros((h, w), dtype=np.float32)
 
-        for y in y_positions:
-            for x in x_positions:
-                y1, x1 = y, x
-                y2 = y + PATCH_SIZE
-                x2 = x + PATCH_SIZE
-                dy, dx = y2 - y1, x2 - x1
+    y_positions = list(range(0, h - PATCH_SIZE + 1, STRIDE))
+    x_positions = list(range(0, w - PATCH_SIZE + 1, STRIDE))
+    if (h - PATCH_SIZE) % STRIDE != 0:
+        y_positions.append(h - PATCH_SIZE)
+    if (w - PATCH_SIZE) % STRIDE != 0:
+        x_positions.append(w - PATCH_SIZE)
 
-                window = Window(x1, y1, dx, dy)
-                band_offset = config.get("band_offset", 2)  # Default to band 2 if not set
-                band_indices = list(range(band_offset, band_offset + INPUT_CHANNELS))
-                img = src.read(band_indices, window=window).astype(np.float32)
+    for y in y_positions:
+        for x in x_positions:
+            patch = img[:, y:y+PATCH_SIZE, x:x+PATCH_SIZE]
+            dy, dx = patch.shape[1], patch.shape[2]
+            pad_bottom = PATCH_SIZE - dy
+            pad_right = PATCH_SIZE - dx
+            patch = np.pad(patch, ((0, 0), (0, pad_bottom), (0, pad_right)), mode='edge')
 
-                if img.shape[1] == 0 or img.shape[2] == 0:
-                    continue
+            valid_mask = (patch != 0).any(axis=0)
+            if valid_mask.sum() == 0:
+                continue
 
-                pad_bottom = PATCH_SIZE - dy
-                pad_right = PATCH_SIZE - dx
-                img = np.pad(img, ((0, 0), (0, pad_bottom), (0, pad_right)), mode='edge')
+            img_tensor = torch.from_numpy(patch).unsqueeze(0).cuda()
+            with torch.no_grad():
+                logits = model(img_tensor).squeeze(0).cpu().numpy()
 
-                img_tensor = torch.from_numpy(img).unsqueeze(0).cuda()
+            logits = logits[:, :dy, :dx]
+            logit_accum[:, y:y+dy, x:x+dx] += logits * valid_mask[None, :, :]
+            weight_map[y:y+dy, x:x+dx] += valid_mask.astype(np.float32)
 
-                def apply_tta(model, img_tensor):
-                    variants = [img_tensor,
-                                torch.flip(img_tensor, dims=[3]),  # H-flip
-                                torch.flip(img_tensor, dims=[2]),  # V-flip
-                                torch.flip(img_tensor, dims=[2, 3])]  # HV-flip
+    avg_logits = logit_accum / np.clip(weight_map, 1e-6, None)
+    avg_probs = softmax(np.moveaxis(avg_logits, 0, -1), axis=-1)
+    pred = np.argmax(avg_probs, axis=-1).astype(np.uint8)
+    pred[weight_map == 1e-6] = 255
 
-                    logits_sum = 0
-                    for variant in variants:
-                        with torch.no_grad():
-                            out = model(variant)
-                        # Unflip to original orientation
-                        if variant is not img_tensor:
-                            if variant.shape != img_tensor.shape:
-                                raise RuntimeError("TTA dimension mismatch")
-                            if torch.equal(variant, torch.flip(img_tensor, dims=[3])):
-                                out = torch.flip(out, dims=[3])
-                            elif torch.equal(variant, torch.flip(img_tensor, dims=[2])):
-                                out = torch.flip(out, dims=[2])
-                            else:
-                                out = torch.flip(out, dims=[2, 3])
-                        logits_sum += out
+    counts = collections.Counter(pred.flatten().tolist())
+    print(f"[DEBUG] Class distribution in prediction: {dict(counts)}")
 
-                    return (logits_sum / len(variants)).squeeze(0).cpu().numpy()
+    tif_name = os.path.basename(input_npy_path).replace("_img.npy", ".tif")
+    tif_guess = os.path.join(config["input_dir"], tif_name)
 
-                # Then replace this call:
-                logits = apply_tta(model, img_tensor)
+    if not os.path.exists(tif_guess):
+        print(f"[WARNING] GeoTIFF not found at {tif_guess}, using dummy georef.")
+        transform = from_origin(0, 0, 10, 10)
+        crs = config.get("crs_target", "EPSG:3035")
+    else:
+        with rasterio.open(tif_guess) as src:
+            transform = src.transform
+            crs = src.crs
 
-                logit_accum[:, y1:y2, x1:x2] += logits[:, :dy, :dx]
-                weight_map[y1:y2, x1:x2] += 1.0
+    meta = {
+        'driver': 'GTiff',
+        'height': pred.shape[0],
+        'width': pred.shape[1],
+        'count': 1,
+        'dtype': 'uint8',
+        'crs': crs,
+        'transform': transform,
+        'compress': 'lzw',
+        'nodata': 255
+    }
 
-        weight_map = np.clip(weight_map, 1e-6, None)
-        avg_logits = logit_accum / weight_map
-        avg_probs = softmax(avg_logits, axis=0)
-        pred = np.argmax(avg_probs, axis=0).astype(np.uint8)
-        decoded = np.clip(pred, 0, 255).astype(np.uint8)
-        decoded[weight_map == 1e-6] = 255
-
-        if label_names:
-            meta["descriptions"] = tuple(label_names.get(str(c), f"Class {c}") for c in range(NUM_CLASSES))
-
-        with rasterio.open(output_tif, 'w', **meta) as dst:
-            dst.write(decoded, 1)
+    with rasterio.open(output_tif_path, 'w', **meta) as dst:
+        dst.write(pred, 1)
 
 # ========== Main ==========
 if __name__ == "__main__":
-    best_epoch, best_f1 = parse_best_epoch(LOG_PATH, fallback_txt_path=os.path.join(CKPT_DIR, "best_epoch.txt"))
-    if best_epoch is None:
-        raise RuntimeError("No valid epoch found in training log.")
+    best_epoch, ckpt_path = parse_best_epoch(LOG_PATH)
+    if best_epoch is None or ckpt_path is None:
+        raise RuntimeError("No valid checkpoint found from best_epoch.txt.")
 
-    ckpt_path = os.path.join(CKPT_DIR, f"model_epoch{best_epoch}_weights.pt")
-    if not os.path.exists(ckpt_path):
-        print(f"[WARNING] model_epoch{best_epoch}_weights.pt not found. Trying best_model_weights.pt...")
-        best_path = os.path.join(CKPT_DIR, "best_model_weights.pt")
-        if os.path.exists(best_path):
-            ckpt_path = best_path
-        else:
-            ckpt_files = glob.glob(os.path.join(CKPT_DIR, "model_epoch*_weights.pt"))
-            if ckpt_files:
-                available_epochs = sorted([
-                    int(re.search(r'model_epoch(\d+)_weights\.pt', os.path.basename(f)).group(1))
-                    for f in ckpt_files
-                ])
-                fallback_epoch = available_epochs[-1]
-                ckpt_path = os.path.join(CKPT_DIR, f"model_epoch{fallback_epoch}_weights.pt")
-                print(f"[WARNING] Fallback: using model_epoch{fallback_epoch}.pt")
-            else:
-                raise FileNotFoundError(f"No model checkpoints available in {CKPT_DIR}")
-
-    print(f"[INFO] Loading best model from epoch {best_epoch} with F1 score {best_f1:.4f}")
     model = load_model(ckpt_path)
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(PRED_OUTPUT_DIR, exist_ok=True)
+    input_files = get_file_list(processed_dir)
 
-    input_files = glob.glob(os.path.join(INPUT_DIR, "*.tif"))
-    print(f"[INFO] Found {len(input_files)} input images in {INPUT_DIR}")
-    print(f"[INFO] Saving predictions to {OUTPUT_DIR}")
+    print(f"[INFO] Found {len(input_files)} input tiles in {processed_dir}")
+    print(f"[INFO] Saving predictions to {PRED_OUTPUT_DIR}")
 
-    for input_path in tqdm(input_files, desc="Running inference", unit="tile"):
-        filename = os.path.basename(input_path)
-        output_path = os.path.join(OUTPUT_DIR, filename)
-        run_inference(model, input_path, output_path)
+    for base_path in tqdm(input_files, desc="Running inference", unit="tile"):
+        input_npy = base_path + "_img.npy"
+        output_tif = os.path.join(PRED_OUTPUT_DIR, os.path.basename(base_path) + "_pred.tif")
+        run_inference(model, input_npy, output_tif)
 
     print("[INFO] Inference complete.")
