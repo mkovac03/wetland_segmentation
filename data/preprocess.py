@@ -1,15 +1,26 @@
 import os
 import glob
-import rasterio
-from rasterio.warp import calculate_default_transform, reproject, Resampling
-from rasterio.env import Env
-import numpy as np
-from tqdm import tqdm
+import re
+import json
 import argparse
 import yaml
-import json
+import numpy as np
+from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
+import rasterio
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+from collections import defaultdict
+from scipy.stats import entropy
 
+# ========== Utilities ==========
+
+def extract_zone_and_index(path):
+    basename = os.path.basename(path)
+    zone_match = re.search(r'_(326\d{2})_', basename)
+    index_match = re.findall(r"(\d+)(?=\.tif$)", basename)
+    if zone_match and index_match:
+        return zone_match.group(1), index_match[-1]
+    return None, None
 
 def center_crop(array, target_size=(512, 512)):
     if array.ndim == 3:
@@ -25,175 +36,195 @@ def center_crop(array, target_size=(512, 512)):
         j = (w - tw) // 2
         return array[i:i+th, j:j+tw]
     else:
-        raise ValueError(f"Unsupported array shape for cropping: {array.shape}")
+        raise ValueError(f"Unsupported array shape: {array.shape}")
 
+def reproject_stack(src, target_crs):
+    dst_transform, width, height = calculate_default_transform(
+        src.crs, target_crs, src.width, src.height, *src.bounds)
+    out = np.empty((src.count, height, width), dtype=src.dtypes[0])
+    for i in range(1, src.count + 1):
+        reproject(
+            source=rasterio.band(src, i),
+            destination=out[i - 1],
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=dst_transform,
+            dst_crs=target_crs,
+            resampling=Resampling.nearest if i == 1 else Resampling.bilinear
+        )
+    return out, dst_transform
 
-# ========== Remap definitions ==========
-merge_map = {
-    0: [0], 1: [1], 2: [2, 4, 6], 3: [8], 4: [9], 5: [10], 6: [12],
-    7: [11, 13], 8: [14], 9: [15], 10: [16, 17, 20, 21, 22],
-    11: [18], 12: [19]
-}
-remap_dict = {old: new for new, olds in merge_map.items() for old in olds}
-label_names = {
-    0: "No Wetland", 1: "Rice Fields", 2: "Riparian, fluvial and swamp forest",
-    3: "Managed or grazed meadow", 4: "Wet grasslands", 5: "Wet heaths", 6: "Beaches",
-    7: "Inland marshes", 8: "Open mires", 9: "Salt marshes", 10: "Surface water",
-    11: "Saltpans", 12: "Intertidal flats"
-}
-ignore_val = 255
-nodata_val = -32768
-num_classes = len(merge_map)
+# ========== Tile Processing ==========
 
-
-def is_valid_npy(path):
+def compute_histogram(tile_key, tif_list, config):
     try:
-        arr = np.load(path)
-        return arr.size > 0
-    except:
-        return False
+        target_crs = config["crs_target"]
+        processed_dir = config["processed_dir"]
+        remap_dict = config["label_remap"]
+        ignore_val = config["ignore_val"]
+        nodata_val = config["nodata_val"]
 
+        tif_list = sorted(tif_list)
+        bands = []
 
-def process_file(args):
-    f, config = args
-    input_channels = config["input_channels"]
-    target_crs = config["crs_target"]
-    output_dir = config["processed_dir"]
+        for path in tif_list:
+            with rasterio.open(path) as src:
+                array, _ = reproject_stack(src, target_crs)
+                bands.extend(array)
 
-    base = os.path.splitext(os.path.basename(f))[0]
-    img_out = os.path.join(output_dir, f"{base}_img.npy")
-    lbl_out = os.path.join(output_dir, f"{base}_lbl.npy")
+        image = np.stack(bands)
+        label = image[0].astype(np.int32)
+        label[label == nodata_val] = ignore_val
+        remapped = np.vectorize(lambda v: remap_dict.get(v, ignore_val))(label).astype(np.uint8)
 
-    if os.path.exists(img_out) and os.path.exists(lbl_out):
-        if is_valid_npy(img_out) and is_valid_npy(lbl_out):
-            return None
+        hist_dir = os.path.join(processed_dir, "label_histograms")
+        os.makedirs(hist_dir, exist_ok=True)
+        classes, counts = np.unique(remapped[remapped != ignore_val], return_counts=True)
+        hist = dict(zip(map(str, classes.tolist()), counts.tolist()))
 
-    try:
-        with Env(GDAL_NUM_THREADS="ALL_CPUS"):
-            with rasterio.open(f) as src:
-                if src.crs is None:
-                    return f"[ERROR] {f} has no CRS"
-                if src.count < input_channels + 1:
-                    return f"[ERROR] {f} has only {src.count} bands but {input_channels + 1} needed"
+        with open(os.path.join(hist_dir, f"tile_{tile_key}.json"), "w") as f:
+            json.dump({"tile_id": tile_key, "histogram": hist}, f)
 
-                if src.crs.to_string() != target_crs:
-                    transform, width, height = calculate_default_transform(
-                        src.crs, target_crs, src.width, src.height, *src.bounds)
-                    reproj_arrays = []
-                    for i in range(1, src.count + 1):
-                        dest = np.empty((height, width), dtype=src.dtypes[i - 1])
-                        resampling = Resampling.nearest if i == 1 else Resampling.bilinear
-                        reproject(
-                            source=rasterio.band(src, i),
-                            destination=dest,
-                            src_transform=src.transform,
-                            src_crs=src.crs,
-                            dst_transform=transform,
-                            dst_crs=target_crs,
-                            resampling=resampling
-                        )
-                        reproj_arrays.append(dest)
-                    needs_crop = True
-                else:
-                    reproj_arrays = [src.read(i) for i in range(1, src.count + 1)]
-                    needs_crop = False
-
-                label = reproj_arrays[0].astype(np.int32)
-                label[label == nodata_val] = ignore_val
-                label = np.vectorize(lambda v: remap_dict.get(v, ignore_val))(label).astype(np.uint8)
-
-                unexpected_ids = set(np.unique(label[label != ignore_val])) - set(range(num_classes))
-                if unexpected_ids:
-                    return f"[ERROR] {f} unexpected labels: {unexpected_ids}"
-
-                background_label = remap_dict.get(0)
-                if background_label is not None:
-                    if (np.sum(label == background_label) / label.size) > 0.95:
-                        # Save placeholder .npy files to mark as processed
-                        np.save(img_out, np.zeros((input_channels, 512, 512), dtype=np.float32))
-                        np.save(lbl_out, np.full((512, 512), ignore_val, dtype=np.uint8))
-                        return None
-
-                image = np.stack(reproj_arrays[1:1 + input_channels]).astype(np.float32)
-
-                if needs_crop or image.shape[1:] != (512, 512):
-                    image = center_crop(image, (512, 512))
-                if label.shape != (512, 512):
-                    label = center_crop(label, (512, 512))
-
-                mask = label != ignore_val
-                image = image * mask[None, :, :]
-                image[:, ~mask] = 0  # Ensures background pixels are fully zero
-
-                np.save(img_out, image)
-                np.save(lbl_out, label)
-
-                return None
+        return tile_key, hist, remapped.shape[0], remapped.shape[1]
 
     except Exception as e:
-        return f"[FAIL] {f}: {str(e)}"
+        return tile_key, {"error": str(e)}, 0, 0
 
+def should_process(hist, shape, threshold):
+    if "error" in hist:
+        return False
+    total = shape[0] * shape[1]
+    background = hist.get("0", 0)
+    return (background / total) < threshold
 
-if __name__ == "__main__":
+def label_entropy(hist):
+    values = np.array(list(hist.values()))
+    prob = values / values.sum()
+    return entropy(prob)
+
+def process_tile(tile_key, tif_list, config):
+    try:
+        target_crs = config["crs_target"]
+        patch_size = config.get("patch_size", 512)
+        processed_dir = config["processed_dir"]
+        remap_dict = config["label_remap"]
+        ignore_val = config["ignore_val"]
+        nodata_val = config["nodata_val"]
+
+        out_path = os.path.join(processed_dir, f"tile_{tile_key}.tif")
+
+        tif_list = sorted(tif_list)
+        bands = []
+        transforms = []
+
+        for path in tif_list:
+            with rasterio.open(path) as src:
+                array, transform = reproject_stack(src, target_crs)
+                bands.extend(array)
+                transforms.append(transform)
+
+        image = np.stack(bands)
+
+        if image.shape[0] >= 3:
+            total_pixels = image.shape[1] * image.shape[2]
+            b2_ratio = np.sum(image[1] == nodata_val) / total_pixels
+            b3_ratio = np.sum(image[2] == nodata_val) / total_pixels
+            if b2_ratio > 0.10 and b3_ratio > 0.10:
+                return None
+
+        label = image[0].astype(np.int32)
+        label[label == nodata_val] = ignore_val
+        image[0] = np.vectorize(lambda v: remap_dict.get(v, ignore_val))(label).astype(np.uint8)
+
+        if not np.any(image[0] != ignore_val):
+            return None
+
+        image = center_crop(image, target_size=(patch_size, patch_size))
+
+        meta = {
+            "driver": "GTiff",
+            "height": patch_size,
+            "width": patch_size,
+            "count": image.shape[0],
+            "dtype": image.dtype,
+            "crs": target_crs,
+            "transform": transforms[0],
+            "compress": "lzw",
+            "BIGTIFF": "IF_SAFER"
+        }
+
+        with rasterio.open(out_path, "w", **meta) as dst:
+            dst.write(image)
+
+    except Exception as e:
+        return f"[ERROR] Failed on tile {tile_key}: {e}"
+    return None
+
+# ========== Main ==========
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/config.yaml")
     args = parser.parse_args()
 
-    with open(args.config, "r") as f:
+    with open(args.config) as f:
         config = yaml.safe_load(f)
 
-    os.makedirs(config["processed_dir"], exist_ok=True)
-    input_dir = config["input_dir"]
+    input_dirs = config["input_dirs"]
     processed_dir = config["processed_dir"]
+    splitting_cfg = config.get("splitting", {})
+    bg_thresh = splitting_cfg.get("background_threshold", 0.9)
+    max_tiles = splitting_cfg.get("max_training_tiles", 5000)
+    strategy = splitting_cfg.get("utm_sampling_strategy", "equal")
+    os.makedirs(processed_dir, exist_ok=True)
 
-    input_files = sorted(glob.glob(os.path.join(input_dir, "*.tif")))
+    all_tifs = []
+    for d in input_dirs:
+        all_tifs.extend(glob.glob(os.path.join(d, "*.tif")))
 
-    def validate_tile(tif_path):
-        try:
-            base = os.path.splitext(os.path.basename(tif_path))[0]
-            img_path = os.path.join(processed_dir, f"{base}_img.npy")
-            lbl_path = os.path.join(processed_dir, f"{base}_lbl.npy")
+    tile_groups = {}
+    tile_zones = {}
+    for tif_path in all_tifs:
+        zone, tile_id = extract_zone_and_index(tif_path)
+        if zone and tile_id:
+            key = f"{zone}_{tile_id}"
+            tile_groups.setdefault(key, []).append(tif_path)
+            tile_zones[key] = zone
 
-            if not os.path.exists(img_path) or not os.path.exists(lbl_path):
-                return tif_path
+    print(f"[INFO] Found {len(tile_groups)} tiles")
 
-            if os.path.getsize(img_path) == 0 or os.path.getsize(lbl_path) == 0:
-                return tif_path
+    args_list = [(tile_key, tif_list, config) for tile_key, tif_list in tile_groups.items()]
+    with Pool(max(1, cpu_count() - 1)) as pool:
+        results = list(tqdm(pool.imap_unordered(lambda args: compute_histogram(*args), args_list), total=len(args_list)))
 
-            return None
-        except Exception as e:
-            return f"[CRASH] {tif_path}: {str(e)}"
+    valid_tiles = [(tile_key, hist) for tile_key, hist, h, w in results if should_process(hist, (h, w), bg_thresh)]
+    print(f"[INFO] {len(valid_tiles)} tiles pass background threshold < {bg_thresh}")
 
-    print("[INFO] Scanning input files for missing or corrupt .npy outputs...")
+    zone_dict = defaultdict(list)
+    for tile_key, hist in valid_tiles:
+        zone = tile_zones[tile_key]
+        zone_dict[zone].append((tile_key, hist))
 
-    # Conservative pool size to avoid overloading system memory
-    with Pool(min(cpu_count() // 2, 4)) as pool:
-        results = list(
-            tqdm(pool.imap_unordered(validate_tile, input_files, chunksize=100),
-                 total=len(input_files), desc="Validating tiles")
-        )
-
-    missing_or_corrupt = [r for r in results if isinstance(r, str) and r.endswith(".tif")]
-
-    crashes = [r for r in results if isinstance(r, str) and not r.endswith(".tif")]
-    if crashes:
-        print("\n[WARNING] Some tiles caused crashes during validation:")
-        for line in crashes[:10]:  # Limit display
-            print(line)
-        if len(crashes) > 10:
-            print(f"... {len(crashes) - 10} more crash entries omitted")
-
-    print(f"\n[INFO] Total input .tif tiles:    {len(input_files)}")
-    print(f"[INFO] Already processed OK:      {len(input_files) - len(missing_or_corrupt)}")
-    print(f"[INFO] Missing or broken tiles:   {len(missing_or_corrupt)}\n")
-
-    if len(missing_or_corrupt) == 0:
-        print("[INFO] All tiles already processed. Nothing to do.")
+    selected = []
+    if strategy == "equal":
+        per_zone = max_tiles // len(zone_dict)
+        for zone, tiles in zone_dict.items():
+            sorted_tiles = sorted(tiles, key=lambda x: label_entropy(x[1]), reverse=True)
+            selected.extend(sorted_tiles[:per_zone])
     else:
-        print("[INFO] Starting processing of missing or invalid tiles...")
-        with Pool(min(cpu_count() // 2, 4)) as pool:
-            for res in tqdm(pool.imap_unordered(process_file, [(f, config) for f in missing_or_corrupt]),
-                            total=len(missing_or_corrupt)):
-                if res:
-                    print(res)
+        total_valid = sum(len(v) for v in zone_dict.values())
+        for zone, tiles in zone_dict.items():
+            share = int(max_tiles * len(tiles) / total_valid)
+            sorted_tiles = sorted(tiles, key=lambda x: label_entropy(x[1]), reverse=True)
+            selected.extend(sorted_tiles[:share])
 
+    print(f"[INFO] Selected {len(selected)} tiles for processing")
+
+    process_args = [(tile_key, tile_groups[tile_key], config) for tile_key, _ in selected]
+    with Pool(max(1, cpu_count() - 1)) as pool:
+        for result in tqdm(pool.imap_unordered(lambda args: process_tile(*args), process_args), total=len(process_args), desc="Processing"):
+            if result:
+                print(result)
+
+if __name__ == "__main__":
+    main()

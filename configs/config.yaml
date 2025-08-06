@@ -1,17 +1,48 @@
-# File: configs/config.yaml
+# ===== Input Data =====
+input_dirs:
+  - /media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_01_22
+  - /media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_23_44
+  - /media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_45_63
 
-input_dir: "/media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_01_22"
-processed_dir: "data/processed/{now}"
-splits_path: "data/splits/splits_{now}.json"
-output_dir: "/home/lkm413/wetland_segmentation/outputs/{now}"
+processed_dir: data/processed/{now}
+splits_path: data/splits/splits_{now}.json
+output_dir: /home/lkm413/wetland_segmentation/outputs/{now}
 crs_target: "EPSG:3035"
 
 patch_size: 512
 stride: 512
 batch_size: 16
 num_classes: 13
-input_channels: 22
+input_channels: 64
+band_offset: 2  # Skip label band (index 1), start at band 2 (index 1 in rasterio)
 
+# ===== Label Remapping =====
+label_remap:
+  0: 0
+  1: 1
+  2: 2
+  4: 2
+  6: 2
+  8: 3
+  9: 4
+  10: 5
+  12: 6
+  11: 7
+  13: 7
+  14: 8
+  15: 9
+  16: 10
+  17: 10
+  20: 10
+  21: 10
+  22: 10
+  18: 11
+  19: 12
+
+ignore_val: 255
+nodata_val: -32768
+
+# ===== Model =====
 model:
   encoder: resnet34
   vit_embed_dim: 512
@@ -20,21 +51,24 @@ model:
   vit_img_size: 16
   vit_patch_size: 2
 
+# ===== Training =====
 training:
-  epochs: 100
+  epochs: 200
   lr: 0.0001
   weight_decay: 0.01
   use_amp: true
   early_stopping_metric: loss  # or "f1"
-  early_stopping_patience: 15
+  early_stopping_patience: 30
   deterministic: false
   scheduler: reduce_on_plateau
   scheduler_patience: 10
 
+# ===== TensorBoard =====
 tensorboard:
   restart: true
   port: 6006
 
+# ===== Loss Function =====
 loss:
   focal:
     alpha: 0.25
@@ -44,30 +78,32 @@ loss:
     alpha: 0.2
     beta: 0.8
 
+# ===== Gradient =====
 gradient_clipping: 1.0
 
+# ===== Splitting Strategy =====
 splitting:
   background_threshold: 0.9
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
   seed: 42
-  entropy_percentile: 100
-  max_training_tiles: 5000
+  entropy_percentile: 80
+  max_training_tiles: 10000
   stratify_by_utm: true
   utm_sampling_strategy: "equal"  # or "proportional"
 
+# ===== Sampling =====
 sampling:
   rare_class_boost: 1.5
 
+# ===== Logging =====
 logging:
   checkpoint_interval: 5
   eval_interval: 1
   save_best_only: true
   resume_from_checkpoint: null
 
+# ===== Debugging =====
 debug:
   monitor_memory: true
-
-band_offset: 2  # Starting from band 2 = index 1 in rasterio
-
