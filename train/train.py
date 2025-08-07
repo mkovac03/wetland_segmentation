@@ -249,11 +249,16 @@ for epoch in range(config["training"]["epochs"]):
             loss = ft_loss(out, y) + ce_loss(out_valid, y_valid)
 
         scaler.scale(loss).backward()
-        clip_val = config.get("gradient_clipping", 1.0)  # Default to 1.0 if not specified
+        clip_val = config.get("gradient_clipping", 1.0)
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
         scaler.step(optimizer)
         scaler.update()
         total_loss += loss.item()
+
+        # --- Memory cleanup ---
+        del x, y, out, loss, y_valid, out_valid, valid_mask
+        torch.cuda.empty_cache()
+        gc.collect()
 
     avg_loss = total_loss / len(train_loader)
 
@@ -270,6 +275,11 @@ for epoch in range(config["training"]["epochs"]):
             all_labels.append(y.cpu())
             correct += (pred == y).sum().item()
             total += y.numel()
+
+            # --- Memory cleanup ---
+            del x, y, out, pred
+            torch.cuda.empty_cache()
+            gc.collect()
 
     acc = correct / total
     miou = compute_miou(all_preds, all_labels, config["num_classes"])

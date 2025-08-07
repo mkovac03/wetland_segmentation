@@ -1,3 +1,4 @@
+# File: data/preprocess.py (Updated to save + reload histograms before processing)
 import os
 import glob
 import re
@@ -54,9 +55,8 @@ def reproject_stack(src, target_crs):
         )
     return out, dst_transform
 
-# ========== Tile Processing ==========
-
-def compute_histogram(tile_key, tif_list, config):
+def compute_histogram(args):
+    tile_key, tif_list, config = args
     try:
         target_crs = config["crs_target"]
         processed_dir = config["processed_dir"]
@@ -64,31 +64,35 @@ def compute_histogram(tile_key, tif_list, config):
         ignore_val = config["ignore_val"]
         nodata_val = config["nodata_val"]
 
-        tif_list = sorted(tif_list)
-        bands = []
+        hist_dir = os.path.join(processed_dir, "label_histograms")
+        os.makedirs(hist_dir, exist_ok=True)
 
-        for path in tif_list:
-            with rasterio.open(path) as src:
-                array, _ = reproject_stack(src, target_crs)
-                bands.extend(array)
+        label_path = sorted(tif_list)[0]  # assume label is in band 1 of the first tif
 
-        image = np.stack(bands)
-        label = image[0].astype(np.int32)
+        with rasterio.Env(GDAL_NUM_THREADS="ALL_CPUS"):
+            with rasterio.open(label_path) as src:
+                if src.crs == target_crs:
+                    label = src.read(1)
+                else:
+                    reprojected, _ = reproject_stack(src, target_crs)
+                    label = reprojected[0]
+
+        label = label.astype(np.int32)
         label[label == nodata_val] = ignore_val
         remapped = np.vectorize(lambda v: remap_dict.get(v, ignore_val))(label).astype(np.uint8)
 
-        hist_dir = os.path.join(processed_dir, "label_histograms")
-        os.makedirs(hist_dir, exist_ok=True)
         classes, counts = np.unique(remapped[remapped != ignore_val], return_counts=True)
         hist = dict(zip(map(str, classes.tolist()), counts.tolist()))
 
-        with open(os.path.join(hist_dir, f"tile_{tile_key}.json"), "w") as f:
+        out_path = os.path.join(hist_dir, f"tile_{tile_key}.json")
+        with open(out_path, "w") as f:
             json.dump({"tile_id": tile_key, "histogram": hist}, f)
 
         return tile_key, hist, remapped.shape[0], remapped.shape[1]
 
     except Exception as e:
         return tile_key, {"error": str(e)}, 0, 0
+
 
 def should_process(hist, shape, threshold):
     if "error" in hist:
@@ -102,7 +106,8 @@ def label_entropy(hist):
     prob = values / values.sum()
     return entropy(prob)
 
-def process_tile(tile_key, tif_list, config):
+def process_tile(args):
+    tile_key, tif_list, config = args
     try:
         target_crs = config["crs_target"]
         patch_size = config.get("patch_size", 512)
@@ -111,17 +116,12 @@ def process_tile(tile_key, tif_list, config):
         ignore_val = config["ignore_val"]
         nodata_val = config["nodata_val"]
 
-        out_path = os.path.join(processed_dir, f"tile_{tile_key}.tif")
-
         tif_list = sorted(tif_list)
         bands = []
-        transforms = []
-
         for path in tif_list:
             with rasterio.open(path) as src:
-                array, transform = reproject_stack(src, target_crs)
+                array, _ = reproject_stack(src, target_crs)
                 bands.extend(array)
-                transforms.append(transform)
 
         image = np.stack(bands)
 
@@ -134,34 +134,23 @@ def process_tile(tile_key, tif_list, config):
 
         label = image[0].astype(np.int32)
         label[label == nodata_val] = ignore_val
-        image[0] = np.vectorize(lambda v: remap_dict.get(v, ignore_val))(label).astype(np.uint8)
+        remapped_label = np.vectorize(lambda v: remap_dict.get(v, ignore_val))(label).astype(np.uint8)
 
-        if not np.any(image[0] != ignore_val):
+        if not np.any(remapped_label != ignore_val):
             return None
 
-        image = center_crop(image, target_size=(patch_size, patch_size))
+        remapped_label = center_crop(remapped_label, target_size=(patch_size, patch_size))
+        cropped_image = center_crop(image[1:], target_size=(patch_size, patch_size))
 
-        meta = {
-            "driver": "GTiff",
-            "height": patch_size,
-            "width": patch_size,
-            "count": image.shape[0],
-            "dtype": image.dtype,
-            "crs": target_crs,
-            "transform": transforms[0],
-            "compress": "lzw",
-            "BIGTIFF": "IF_SAFER"
-        }
-
-        with rasterio.open(out_path, "w", **meta) as dst:
-            dst.write(image)
+        np.save(os.path.join(processed_dir, f"tile_{tile_key}_lbl.npy"), remapped_label)
+        np.save(os.path.join(processed_dir, f"tile_{tile_key}_img.npy"), cropped_image)
 
     except Exception as e:
         return f"[ERROR] Failed on tile {tile_key}: {e}"
+
     return None
 
 # ========== Main ==========
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/config.yaml")
@@ -193,9 +182,29 @@ def main():
 
     print(f"[INFO] Found {len(tile_groups)} tiles")
 
-    args_list = [(tile_key, tif_list, config) for tile_key, tif_list in tile_groups.items()]
+    # ========== STEP 1: Compute and Save Histograms ==========
+    hist_dir = os.path.join(processed_dir, "label_histograms")
+    os.makedirs(hist_dir, exist_ok=True)
+
+    args_list = []
+    for tile_key, tif_list in tile_groups.items():
+        json_path = os.path.join(hist_dir, f"tile_{tile_key}.json")
+        if not os.path.exists(json_path):
+            args_list.append((tile_key, tif_list, config))
+
     with Pool(max(1, cpu_count() - 1)) as pool:
-        results = list(tqdm(pool.imap_unordered(lambda args: compute_histogram(*args), args_list), total=len(args_list)))
+        list(tqdm(pool.imap_unordered(compute_histogram, args_list, chunksize=32),
+                  total=len(args_list), desc="Computing histograms"))
+
+    # ========== STEP 2: Reload Histograms and Select Tiles ==========
+    results = []
+    for tile_key in tile_groups:
+        json_path = os.path.join(hist_dir, f"tile_{tile_key}.json")
+        if os.path.exists(json_path):
+            with open(json_path) as f:
+                entry = json.load(f)
+                hist = entry.get("histogram", {})
+                results.append((tile_key, hist, 512, 512))  # assumes 512x512
 
     valid_tiles = [(tile_key, hist) for tile_key, hist, h, w in results if should_process(hist, (h, w), bg_thresh)]
     print(f"[INFO] {len(valid_tiles)} tiles pass background threshold < {bg_thresh}")
@@ -220,9 +229,28 @@ def main():
 
     print(f"[INFO] Selected {len(selected)} tiles for processing")
 
-    process_args = [(tile_key, tile_groups[tile_key], config) for tile_key, _ in selected]
+    # ========== STEP 3: Process Selected Tiles ==========
+    process_args = []
+    for tile_key, _ in selected:
+        img_path = os.path.join(processed_dir, f"tile_{tile_key}_img.npy")
+        lbl_path = os.path.join(processed_dir, f"tile_{tile_key}_lbl.npy")
+
+        needs_processing = False
+        if not (os.path.exists(img_path) and os.path.exists(lbl_path)):
+            needs_processing = True
+        else:
+            try:
+                _ = np.load(img_path, mmap_mode="r")
+                _ = np.load(lbl_path, mmap_mode="r")
+            except Exception:
+                needs_processing = True
+
+        if needs_processing:
+            process_args.append((tile_key, tile_groups[tile_key], config))
+
     with Pool(max(1, cpu_count() - 1)) as pool:
-        for result in tqdm(pool.imap_unordered(lambda args: process_tile(*args), process_args), total=len(process_args), desc="Processing"):
+        for result in tqdm(pool.imap_unordered(process_tile, process_args),
+                           total=len(process_args), desc="Processing"):
             if result:
                 print(result)
 
