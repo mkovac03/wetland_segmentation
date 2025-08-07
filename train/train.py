@@ -2,6 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# ========== Imports ==========
 import json
 import yaml
 import io
@@ -14,14 +15,15 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from PIL import Image
 import matplotlib
-matplotlib.use("Agg")  # Prevent GUI backend issues on headless/server mode
-import matplotlib.patches as mpatches  # add this to the top of your script
+matplotlib.use("Agg")
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_tensor
 import hashlib
 import subprocess
 import datetime
 
+# ========== Project Modules ==========
 from data.dataset import GoogleEmbedDataset
 from data.transform import RandomAugment
 from models.resunet_vit import ResNetUNetViT
@@ -32,6 +34,7 @@ from utils.plotting import add_prediction_legend
 import argparse
 import gc
 
+# ========== Utility Functions ==========
 def is_master_process():
     return not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
 
@@ -54,149 +57,89 @@ def restart_tensorboard(logdir, port=6006):
     except Exception as e:
         print(f"[WARN] Failed to restart TensorBoard: {e}")
 
-# ========= Crash Debugging =========
-print("[DEBUG] CUDA devices available:", torch.cuda.device_count())
-print("[DEBUG] CUDA memory allocated (MB):", torch.cuda.memory_allocated() / 1024**2)
-print("[DEBUG] CUDA memory reserved (MB):", torch.cuda.memory_reserved() / 1024**2)
-
-subprocess.run(["nvidia-smi"])
-
-print(torch.cuda.get_device_name(0))
-print("CUDA available:", torch.cuda.is_available())
-
-# ========= Load config =========
+# ========== Load Config ==========
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="configs/config.yaml")
-parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
+parser.add_argument("--resume", default=None)
 args = parser.parse_args()
 
 with open(args.config, "r") as f:
     config = yaml.safe_load(f)
 
 timestamp = os.path.basename(config["processed_dir"])
-
 if "{now}" in config["output_dir"]:
     config["output_dir"] = config["output_dir"].replace("{now}", timestamp)
 
 print("[DEBUG] Training start time:", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
+# ========== Compute Split Hash ==========
 def get_split_hash(cfg):
     split_cfg = cfg["splitting"]
     hash_input = json.dumps({
         "train_ratio": split_cfg.get("train_ratio", 0.8),
         "val_ratio": split_cfg.get("val_ratio", 0.1),
         "test_ratio": split_cfg.get("test_ratio", 0.1),
-        "background_threshold": split_cfg.get("background_threshold", 0.9),
         "seed": split_cfg.get("seed", 42),
-        "num_classes": cfg["num_classes"],
-        "max_training_tiles": split_cfg.get("max_training_tiles", None),
-        "entropy_percentile": split_cfg.get("entropy_percentile", None),
-        "stratify_by_utm": split_cfg.get("stratify_by_utm", False),
-        "utm_sampling_strategy": split_cfg.get("utm_sampling_strategy", "equal")
+        "num_classes": cfg["num_classes"]
     }, sort_keys=True)
     return hashlib.md5(hash_input.encode()).hexdigest()[:8]
 
-# ========= Load splits =========
+# ========== Load Splits ==========
 split_hash = get_split_hash(config)
 config["splits_path"] = f"data/splits/splits_{timestamp}_{split_hash}.json"
-
 if not os.path.exists(config["splits_path"]):
     generate_splits_and_weights(config)
 
 with open(config["splits_path"], "r") as f:
     splits = json.load(f)
 
-# ========= TensorBoard =========
+# ========== TensorBoard ==========
 if config.get("tensorboard", {}).get("restart", True):
     port = config.get("tensorboard", {}).get("port", 6006)
     restart_tensorboard(logdir=config["output_dir"], port=port)
 
-# ========= TensorBoard writer path =========
-os.makedirs(config["output_dir"], exist_ok=True)
-run_name = os.path.basename(config["output_dir"])
 writer = SummaryWriter(log_dir=config["output_dir"])
 
-# ========= Class weights and sample weights =========
+# ========== Datasets ==========
 n_classes = config["num_classes"]
-
-# ========= Dataset =========
 train_transform = RandomAugment(p=0.5)
 train_ds = GoogleEmbedDataset(splits["train"], transform=train_transform, check_files=True, num_classes=n_classes)
-val_ds   = GoogleEmbedDataset(splits["val"], check_files=True, num_classes=n_classes)
+val_ds = GoogleEmbedDataset(splits["val"], check_files=True, num_classes=n_classes)
 
 print(f"[INFO] Loaded {len(train_ds)} training and {len(val_ds)} validation samples.")
 if len(train_ds) == 0 or len(val_ds) == 0:
     raise RuntimeError("Train or validation dataset is empty.")
 
-weights_dir = os.path.join(config["output_dir"], "weights")
-os.makedirs(weights_dir, exist_ok=True)
-
-weights_path = os.path.join(weights_dir, f"weights_{timestamp}_{split_hash}.npz")
-pixel_path   = os.path.join(weights_dir, f"weights_{timestamp}_{split_hash}_pixels.npy")
-
-# === 1. Pixel counts ===
-if os.path.exists(pixel_path):
-    try:
-        label_counts = np.load(pixel_path)
-        if not isinstance(label_counts, np.ndarray) or label_counts.shape[0] != n_classes:
-            raise ValueError(f"Invalid shape: {label_counts.shape}")
-        print(f"[INFO] Loaded pixel counts from: {pixel_path}")
-    except Exception as e:
-        raise RuntimeError(f"[ERROR] Expected pixel count file {pixel_path} to exist, but failed to load: {e}")
-else:
-    raise FileNotFoundError(f"[ERROR] Pixel count file not found: {pixel_path}. Expected this to be created during split_data step.")
-
-weights_path = os.path.join(weights_dir, f"weights_{timestamp}_{split_hash}.npz")
+# ========== Load Weights ==========
+weights_path = os.path.join(config["output_dir"], "weights", f"weights_{timestamp}_{split_hash}.npz")
 if not os.path.exists(weights_path):
-    raise FileNotFoundError(f"[ERROR] Class/sample weights file not found: {weights_path}")
+    raise FileNotFoundError(f"[ERROR] Weights file not found: {weights_path}")
 
 data = np.load(weights_path)
 class_weights = data["class_weights"]
 sample_weights = data["sample_weights"]
-print(f"[INFO] Loaded weights from: {weights_path}")
 
 if len(sample_weights) != len(train_ds.file_list):
-    print(f"[WARN] Reindexing sample_weights: original={len(sample_weights)}, filtered={len(train_ds.file_list)}")
-    # Assume weights are stored aligned with unfiltered tile list
-    # We'll match filenames
-    with open(config["splits_path"], "r") as f:
-        full_splits = json.load(f)
-    all_train_files = full_splits["train"]
+    raise RuntimeError("Mismatch between sample weights and dataset tiles.")
 
-    tile_to_weight = dict(zip(all_train_files, sample_weights))
-    sample_weights = [tile_to_weight[fp] for fp in train_ds.file_list if fp in tile_to_weight]
-    if len(sample_weights) != len(train_ds.file_list):
-        raise RuntimeError("Failed to match sample weights to filtered train file list.")
-
-rare_class_boost = config.get("sampling", {}).get("rare_class_boost", 1.5)
-
+# ========== Sampler ==========
 tile_scores = np.array(sample_weights)
-tile_scores = tile_scores ** rare_class_boost
+tile_scores = tile_scores ** config.get("sampling", {}).get("rare_class_boost", 1.5)
 tile_scores /= tile_scores.sum()
 
 sampler = WeightedRandomSampler(tile_scores, num_samples=len(train_ds.file_list), replacement=True)
 
-# ========= Dataloaders =========
+# ========== Dataloaders ==========
 train_loader = DataLoader(train_ds, batch_size=config["batch_size"], sampler=sampler,
                           num_workers=2, pin_memory=True, prefetch_factor=2, persistent_workers=True)
-val_loader = DataLoader(
-    val_ds,
-    batch_size=config["batch_size"],  # unified
-    shuffle=False,
-    num_workers=2,
-    pin_memory=True,
-    prefetch_factor=2,
-    persistent_workers=True
-)
+val_loader = DataLoader(val_ds, batch_size=config["batch_size"], shuffle=False,
+                        num_workers=2, pin_memory=True, prefetch_factor=2, persistent_workers=True)
 
-# ========= Model =========
+# ========== Model and Optimizer ==========
 model = ResNetUNetViT(config).cuda()
-print("Device:", next(model.parameters()).device)
+optimizer = optim.AdamW(model.parameters(), lr=config["training"]["lr"], weight_decay=config["training"]["weight_decay"])
 
-optimizer = optim.AdamW(model.parameters(),
-                        lr=config["training"]["lr"],
-                        weight_decay=config["training"]["weight_decay"])
-
+# ========== Loss Functions ==========
 ft_loss = CombinedFocalTverskyLoss(
     num_classes=config["num_classes"],
     focal_alpha=config["loss"]["focal"]["alpha"],
@@ -206,9 +149,11 @@ ft_loss = CombinedFocalTverskyLoss(
     tversky_beta=config["loss"]["tversky"]["beta"],
     ignore_index=255
 )
-ce_weight = torch.tensor(class_weights, dtype=torch.float32).cuda()
-ce_loss   = nn.CrossEntropyLoss(weight=ce_weight, ignore_index=255)
 
+ce_weight = torch.tensor(class_weights, dtype=torch.float32).cuda()
+ce_loss = nn.CrossEntropyLoss(weight=ce_weight, ignore_index=255)
+
+# ========== AMP Scaler ==========
 scaler = GradScaler(enabled=config["training"].get("use_amp", True))
 
 es_metric = config["training"]["early_stopping_metric"].lower()
@@ -327,12 +272,7 @@ for epoch in range(config["training"]["epochs"]):
                 for j in range(3):
                     axs[i, j].axis("off")
 
-            label_names = {
-                0: "No Wetland", 1: "Rice Fields", 2: "Riparian, fluvial and swamp forest",
-                3: "Managed or grazed meadow", 4: "Wet grasslands", 5: "Wet heaths", 6: "Beaches",
-                7: "Inland marshes", 8: "Open mires", 9: "Salt marshes", 10: "Surface water",
-                11: "Saltpans", 12: "Intertidal flats"
-            }
+            label_names = config.get("label_names", {})
             add_prediction_legend(axs[-1, 2], config["num_classes"], label_names)
 
             plt.tight_layout()

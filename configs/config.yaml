@@ -39,6 +39,21 @@ label_remap:
   18: 11
   19: 12
 
+label_names:
+  0: "No Wetland"
+  1: "Rice Fields"
+  2: "Riparian, fluvial and swamp forest"
+  3: "Managed or grazed meadow"
+  4: "Wet grasslands"
+  5: "Wet heaths"
+  6: "Beaches"
+  7: "Inland marshes"
+  8: "Open mires"
+  9: "Salt marshes"
+  10: "Surface water"
+  11: "Saltpans"
+  12: "Intertidal flats"
+
 ignore_val: 255
 nodata_val: -32768
 
