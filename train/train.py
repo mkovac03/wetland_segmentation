@@ -291,11 +291,39 @@ for epoch in range(config["training"]["epochs"]):
     writer.add_scalar("F1/val", f1, epoch)
     writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
 
-    # ===== Save model first =====
-    if epoch % save_every == 0 and is_master_process():
+    # ===== Convert and Save Model Weights if Needed =====
+    fp16_weights = None
+    if epoch % save_every == 0 or improved:
         fp16_weights = convert_to_fp16(model.state_dict())
+
+    if epoch % save_every == 0 and is_master_process():
         torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_ep{epoch + 1}_weights.pt"),
                    _use_new_zipfile_serialization=False)
+
+    curr_metric = avg_loss if es_metric == "loss" else f1
+    improved = curr_metric < best_metric if es_metric == "loss" else curr_metric > best_metric
+
+    if improved:
+        best_metric = curr_metric
+        no_improve = 0
+        if is_master_process():
+            torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_ep{epoch + 1}_weights.pt"),
+                       _use_new_zipfile_serialization=False)
+            torch.save(fp16_weights, os.path.join(config["output_dir"], "best_model_weights.pt"),
+                       _use_new_zipfile_serialization=False)
+            with open(os.path.join(config["output_dir"], "best_epoch.txt"), "w") as f:
+                f.write(f"{epoch + 1},{f1:.4f}\n")
+        print(f"[INFO] New best @ epoch {epoch + 1}, F1={f1:.4f}")
+        del acc, miou, f1, avg_loss
+    else:
+        no_improve += 1
+        if no_improve >= patience:
+            print(f"[INFO] Early stopping at epoch {epoch + 1}")
+            break
+
+    del fp16_weights
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # ===== Visual Logging to TensorBoard =====
     if (epoch + 1) % save_every == 0 or epoch == 0:
@@ -356,37 +384,7 @@ for epoch in range(config["training"]["epochs"]):
         except Exception as e:
             print(f"[WARN] TensorBoard image logging failed: {e}")
 
-    if epoch == 0:
-        torch.cuda.empty_cache()
-        gc.collect()
 
-    curr_metric = avg_loss if es_metric == "loss" else f1
-    improved = curr_metric < best_metric if es_metric == "loss" else curr_metric > best_metric
-
-    if improved:
-        best_metric = curr_metric
-        no_improve = 0
-        fp16_weights = convert_to_fp16(model.state_dict())
-        if is_master_process():
-            torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_ep{epoch + 1}_weights.pt"),
-                       _use_new_zipfile_serialization=False)
-            torch.save(fp16_weights, os.path.join(config["output_dir"], "best_model_weights.pt"),
-                       _use_new_zipfile_serialization=False)
-            with open(os.path.join(config["output_dir"], "best_epoch.txt"), "w") as f:
-                f.write(f"{epoch + 1},{f1:.4f}\n")
-        print(f"[INFO] New best @ epoch {epoch + 1}, F1={f1:.4f}")
-        del acc, miou, f1, avg_loss
-    else:
-        no_improve += 1
-        if no_improve >= patience:
-            print(f"[INFO] Early stopping at epoch {epoch+1}")
-            break
-
-    scheduler.step(curr_metric)
-    log_memory(epoch + 1)
-
-    gc.collect()
-    torch.cuda.empty_cache()
 
 log_file.close()
 writer.close()
