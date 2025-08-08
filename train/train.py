@@ -292,41 +292,34 @@ for epoch in range(config["training"]["epochs"]):
     writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
 
     # ===== Convert and Save Model Weights if Needed =====
-    fp16_weights = None
     curr_metric = avg_loss if es_metric == "loss" else f1
     improved = curr_metric < best_metric if es_metric == "loss" else curr_metric > best_metric
-
-    if epoch % save_every == 0 or improved:
-        fp16_weights = convert_to_fp16(model.state_dict())
-
-        if is_master_process():
-            if epoch % save_every == 0:
-                torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_ep{epoch + 1}_weights.pt"),
-                           _use_new_zipfile_serialization=False)
-
-            if improved:
-                torch.save(fp16_weights, os.path.join(config["output_dir"], "best_model_weights.pt"),
-                           _use_new_zipfile_serialization=False)
-                with open(os.path.join(config["output_dir"], "best_epoch.txt"), "w") as f:
-                    f.write(f"{epoch + 1},{f1:.4f}\n")
 
     if improved:
         best_metric = curr_metric
         no_improve = 0
         print(f"[INFO] New best @ epoch {epoch + 1}, F1={f1:.4f}")
-        del acc, miou, f1, avg_loss
+
+        fp16_weights = convert_to_fp16(model.state_dict())
+
+        if is_master_process():
+            torch.save(fp16_weights, os.path.join(config["output_dir"], f"best_model_ep{epoch + 1}_weights.pt"),
+                       _use_new_zipfile_serialization=False)
+            with open(os.path.join(config["output_dir"], "best_epoch.txt"), "w") as f:
+                f.write(f"{epoch + 1},{f1:.4f}\n")
+
+        del fp16_weights, acc, miou, f1, avg_loss
     else:
         no_improve += 1
         if no_improve >= patience:
             print(f"[INFO] Early stopping at epoch {epoch + 1}")
             break
 
-    del fp16_weights
     gc.collect()
     torch.cuda.empty_cache()
 
     # ===== Visual Logging to TensorBoard =====
-    if (epoch + 1) % save_every == 0 or epoch == 0:
+    if epoch == 0 or (epoch + 1) % save_every == 0:
         log_memory(f"{epoch}-before-TB")
         model.eval()
         try:
@@ -362,11 +355,12 @@ for epoch in range(config["training"]["epochs"]):
             plt.tight_layout()
             buf = io.BytesIO()
             plt.savefig(buf, format="png")
+            plt.clf()
+            plt.close('all')
             buf.seek(0)
             img = Image.open(buf)
             img_tensor = to_tensor(img)
             writer.add_image("Validation/Label_vs_Prediction", img_tensor, global_step=epoch)
-            plt.close("all")
             writer.flush()
 
             del fig, axs, sample_x, sample_y, pred, img_tensor, img, buf
