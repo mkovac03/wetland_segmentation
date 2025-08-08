@@ -29,5 +29,9 @@ sed "s|{now}|$NOW|g" "$CONFIG_SRC" > "$CONFIG_EXPANDED"
 ## Run split_data.py to generate splits and weights
 #python split_data.py --config "$CONFIG_EXPANDED"
 
+# Kill stale processes
+echo "[INFO] Cleaning up previous runs..."
+pkill -f -u "$USER" "train/train.py" || true
+
 # Run training
 python train/train.py --config "$CONFIG_EXPANDED"
