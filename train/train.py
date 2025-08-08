@@ -293,26 +293,26 @@ for epoch in range(config["training"]["epochs"]):
 
     # ===== Convert and Save Model Weights if Needed =====
     fp16_weights = None
+    curr_metric = avg_loss if es_metric == "loss" else f1
+    improved = curr_metric < best_metric if es_metric == "loss" else curr_metric > best_metric
+
     if epoch % save_every == 0 or improved:
         fp16_weights = convert_to_fp16(model.state_dict())
 
-    if epoch % save_every == 0 and is_master_process():
-        torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_ep{epoch + 1}_weights.pt"),
-                   _use_new_zipfile_serialization=False)
+        if is_master_process():
+            if epoch % save_every == 0:
+                torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_ep{epoch + 1}_weights.pt"),
+                           _use_new_zipfile_serialization=False)
 
-    curr_metric = avg_loss if es_metric == "loss" else f1
-    improved = curr_metric < best_metric if es_metric == "loss" else curr_metric > best_metric
+            if improved:
+                torch.save(fp16_weights, os.path.join(config["output_dir"], "best_model_weights.pt"),
+                           _use_new_zipfile_serialization=False)
+                with open(os.path.join(config["output_dir"], "best_epoch.txt"), "w") as f:
+                    f.write(f"{epoch + 1},{f1:.4f}\n")
 
     if improved:
         best_metric = curr_metric
         no_improve = 0
-        if is_master_process():
-            torch.save(fp16_weights, os.path.join(config["output_dir"], f"model_ep{epoch + 1}_weights.pt"),
-                       _use_new_zipfile_serialization=False)
-            torch.save(fp16_weights, os.path.join(config["output_dir"], "best_model_weights.pt"),
-                       _use_new_zipfile_serialization=False)
-            with open(os.path.join(config["output_dir"], "best_epoch.txt"), "w") as f:
-                f.write(f"{epoch + 1},{f1:.4f}\n")
         print(f"[INFO] New best @ epoch {epoch + 1}, F1={f1:.4f}")
         del acc, miou, f1, avg_loss
     else:
@@ -327,46 +327,37 @@ for epoch in range(config["training"]["epochs"]):
 
     # ===== Visual Logging to TensorBoard =====
     if (epoch + 1) % save_every == 0 or epoch == 0:
+        log_memory(f"{epoch}-before-TB")
         model.eval()
         try:
             num_samples = 1
-            fig, axs = plt.subplots(num_samples, 3, figsize=(12, 3 * num_samples))
+            fig, axs = plt.subplots(num_samples, 2, figsize=(8, 3 * num_samples))  # 2 columns only
 
             for i in range(num_samples):
                 tile_path = val_ds.file_list[i]
                 tile_id = os.path.basename(tile_path)
 
                 sample_x, sample_y = val_ds[i]
-                sample_x_vis = sample_x.clone()
                 sample_x = sample_x.unsqueeze(0).cuda()
                 with torch.no_grad():
                     pred = model(sample_x).argmax(1).squeeze().cpu()
-
-                # Normalize and prepare 3-band composite: A01, A16, A09 = indices [0, 15, 8]
-                vis_bands = [0, 15, 8]
-                vis_img = sample_x_vis[vis_bands]
-                vis_img = (vis_img - vis_img.min()) / (vis_img.max() - vis_img.min() + 1e-6)
-                vis_img = vis_img.permute(1, 2, 0).numpy()  # HWC
 
                 # Label distribution printout
                 u, c = np.unique(sample_y.numpy(), return_counts=True)
                 dist_str = ", ".join([f"{int(cls)}: {cnt}" for cls, cnt in zip(u, c)])
                 print(f"[VISUAL LOGGING] {tile_id} → Label Distribution: {dist_str}")
 
-                axs[i, 0].imshow(vis_img)
-                axs[i, 0].set_title(f"{tile_id} - Embedding")
+                axs[i, 0].imshow(sample_y, cmap="tab20")
+                axs[i, 0].set_title(f"{tile_id} - Label")
 
-                axs[i, 1].imshow(sample_y, cmap="tab20")
-                axs[i, 1].set_title(f"{tile_id} - Label")
+                axs[i, 1].imshow(pred, cmap="tab20")
+                axs[i, 1].set_title(f"{tile_id} - Prediction")
 
-                axs[i, 2].imshow(pred, cmap="tab20")
-                axs[i, 2].set_title(f"{tile_id} - Prediction")
-
-                for j in range(3):
+                for j in range(2):
                     axs[i, j].axis("off")
 
             label_names = config.get("label_names", {})
-            add_prediction_legend(axs[-1, 2], config["num_classes"], label_names)
+            add_prediction_legend(axs[-1, 1], config["num_classes"], label_names)
 
             plt.tight_layout()
             buf = io.BytesIO()
@@ -374,17 +365,16 @@ for epoch in range(config["training"]["epochs"]):
             buf.seek(0)
             img = Image.open(buf)
             img_tensor = to_tensor(img)
-            writer.add_image("Validation/Pred_vs_GT_Grid", img_tensor, global_step=epoch)
+            writer.add_image("Validation/Label_vs_Prediction", img_tensor, global_step=epoch)
             plt.close("all")
             writer.flush()
-            del fig, axs, vis_img, sample_x, sample_y, sample_x_vis, pred, img_tensor, img, buf
+
+            del fig, axs, sample_x, sample_y, pred, img_tensor, img, buf
             gc.collect()
             torch.cuda.empty_cache()
 
         except Exception as e:
             print(f"[WARN] TensorBoard image logging failed: {e}")
-
-
 
 log_file.close()
 writer.close()
