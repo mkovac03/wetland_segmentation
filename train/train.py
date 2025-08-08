@@ -60,8 +60,12 @@ def convert_to_fp16(state_dict):
 
 def restart_tensorboard(logdir, port=6006):
     try:
-        subprocess.run(["pkill", "-f", "tensorboard"], check=False)
-        subprocess.run(["pkill", "-f", "tensorboard_data_server"], check=False)
+        # Kill only processes with this exact logdir
+        output = subprocess.check_output(["pgrep", "-f", f"tensorboard.*{logdir}"])
+        pids = output.decode().strip().split("\n")
+        for pid in pids:
+            subprocess.run(["kill", "-9", pid], check=False)
+
         subprocess.Popen([
             "tensorboard",
             f"--logdir={logdir}",
@@ -71,8 +75,20 @@ def restart_tensorboard(logdir, port=6006):
             "--load_fast=false"
         ])
         print(f"[INFO] TensorBoard restarted at http://localhost:{port}")
+    except subprocess.CalledProcessError:
+        # pgrep found no process; safe to start fresh
+        subprocess.Popen([
+            "tensorboard",
+            f"--logdir={logdir}",
+            f"--port={port}",
+            "--host=127.0.0.1",
+            "--reload_interval=5",
+            "--load_fast=false"
+        ])
+        print(f"[INFO] TensorBoard started at http://localhost:{port}")
     except Exception as e:
         print(f"[WARN] Failed to restart TensorBoard: {e}")
+
 
 # ========== Load Config ==========
 parser = argparse.ArgumentParser()
