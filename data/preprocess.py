@@ -97,9 +97,21 @@ def compute_histogram(args):
 def should_process(hist, shape, threshold):
     if "error" in hist:
         return False
+
     total = shape[0] * shape[1]
     background = hist.get("0", 0)
-    return (background / total) < threshold
+    water = hist.get("10", 0)
+
+    background_ratio = background / total
+    water_ratio = water / total
+
+    if background_ratio > threshold:
+        return False
+    if water_ratio > 0.5:
+        return False
+
+    return True
+
 
 def label_entropy(hist):
     values = np.array(list(hist.values()))
@@ -115,6 +127,8 @@ def process_tile(args):
         remap_dict = config["label_remap"]
         ignore_val = config["ignore_val"]
         nodata_val = config["nodata_val"]
+        expected_channels = config["input_channels"]
+        num_classes = config["num_classes"]
 
         tif_list = sorted(tif_list)
         bands = []
@@ -123,24 +137,35 @@ def process_tile(args):
                 array, _ = reproject_stack(src, target_crs)
                 bands.extend(array)
 
-        image = np.stack(bands)
-
-        if image.shape[0] >= 3:
-            total_pixels = image.shape[1] * image.shape[2]
-            b2_ratio = np.sum(image[1] == nodata_val) / total_pixels
-            b3_ratio = np.sum(image[2] == nodata_val) / total_pixels
-            if b2_ratio > 0.10 and b3_ratio > 0.10:
-                return None
-
+        image = np.stack(bands)  # [C, H, W]
         label = image[0].astype(np.int32)
         label[label == nodata_val] = ignore_val
         remapped_label = np.vectorize(lambda v: remap_dict.get(v, ignore_val))(label).astype(np.uint8)
 
-        if not np.any(remapped_label != ignore_val):
-            return None
+        # Check for presence of valid classes
+        unique_vals = np.unique(remapped_label)
+        if not np.any((unique_vals < num_classes) & (unique_vals != ignore_val)):
+            return f"Tile {tile_key} skipped: no valid labels (only ignore or out of bounds)"
+
+        # Final shape check
+        if remapped_label.shape[0] < patch_size or remapped_label.shape[1] < patch_size:
+            return f"Tile {tile_key} skipped: shape too small {remapped_label.shape}"
 
         remapped_label = center_crop(remapped_label, target_size=(patch_size, patch_size))
-        cropped_image = center_crop(image[1:], target_size=(patch_size, patch_size))
+
+        # Remove label, drop bands 22 and 45 (indexing from 0, so 21 and 44)
+        image_data = image[1:]  # [C-1, H, W]
+        drop_idx = {22, 45}
+        keep_bands = [i for i in range(image_data.shape[0]) if i not in drop_idx]
+        filtered_image = image_data[keep_bands]
+
+        # ✅ Now check channel count AFTER removing unwanted bands
+        if filtered_image.shape[0] != config["input_channels"]:
+            return f"Tile {tile_key} skipped: Expected {config['input_channels']} channels, got {filtered_image.shape[0]}"
+
+        # Continue processing
+        cropped_image = center_crop(filtered_image, target_size=(patch_size, patch_size))
+        cropped_image = np.where(cropped_image == nodata_val, ignore_val, cropped_image).astype(filtered_image.dtype)
 
         np.save(os.path.join(processed_dir, f"tile_{tile_key}_lbl.npy"), remapped_label)
         np.save(os.path.join(processed_dir, f"tile_{tile_key}_img.npy"), cropped_image)
@@ -149,6 +174,7 @@ def process_tile(args):
         return f"[ERROR] Failed on tile {tile_key}: {e}"
 
     return None
+
 
 # ========== Main ==========
 def main():
@@ -181,6 +207,7 @@ def main():
             tile_zones[key] = zone
 
     print(f"[INFO] Found {len(tile_groups)} tiles")
+    print(f"[DEBUG] Zone counts: {dict((z, len([k for k in tile_zones if tile_zones[k] == z])) for z in set(tile_zones.values()))}")
 
     # ========== STEP 1: Compute and Save Histograms ==========
     hist_dir = os.path.join(processed_dir, "label_histograms")
@@ -206,8 +233,18 @@ def main():
                 hist = entry.get("histogram", {})
                 results.append((tile_key, hist, 512, 512))  # assumes 512x512
 
-    valid_tiles = [(tile_key, hist) for tile_key, hist, h, w in results if should_process(hist, (h, w), bg_thresh)]
-    print(f"[INFO] {len(valid_tiles)} tiles pass background threshold < {bg_thresh}")
+    # First apply background filter only
+    bg_pass_tiles = [(tile_key, hist, h, w) for tile_key, hist, h, w in results
+                     if "error" not in hist and (hist.get("0", 0) / (h * w)) < bg_thresh]
+
+    print(f"[INFO] {len(bg_pass_tiles)} tiles pass background threshold < {bg_thresh}")
+
+    # Then apply water filter on top
+    valid_tiles = [(tile_key, hist) for tile_key, hist, h, w in bg_pass_tiles
+                   if (hist.get("10", 0) / (h * w)) <= 0.5]
+
+    num_water_excluded = len(bg_pass_tiles) - len(valid_tiles)
+    print(f"[INFO] {num_water_excluded} tiles excluded due to >50% surface water (class 10)")
 
     zone_dict = defaultdict(list)
     for tile_key, hist in valid_tiles:
@@ -228,6 +265,16 @@ def main():
             selected.extend(sorted_tiles[:share])
 
     print(f"[INFO] Selected {len(selected)} tiles for processing")
+
+    # ========== DEBUG: Zone distribution in selected tiles ==========
+    zone_counts = defaultdict(int)
+    for tile_key, _ in selected:
+        zone = tile_key.split("_")[0]
+        zone_counts[zone] += 1
+
+    print("[DEBUG] Selected tile counts per zone:")
+    for zone, count in sorted(zone_counts.items()):
+        print(f"  Zone {zone}: {count}")
 
     # ========== STEP 3: Process Selected Tiles ==========
     process_args = []
@@ -252,7 +299,10 @@ def main():
         for result in tqdm(pool.imap_unordered(process_tile, process_args),
                            total=len(process_args), desc="Processing"):
             if result:
-                print(result)
+                tile_key = result.split()[2]  # from "Processed tile <tile_key> (Zone XXX)"
+                zone = tile_key.split("_")[0]
+                print(f"[INFO] Zone {zone} → {result}")
+
 
 if __name__ == "__main__":
     main()

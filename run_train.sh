@@ -22,6 +22,12 @@ echo "[INFO] Using timestamp: $NOW"
 CONFIG_SRC="configs/config.yaml"
 CONFIG_EXPANDED="configs/config_expanded.yaml"
 sed "s|{now}|$NOW|g" "$CONFIG_SRC" > "$CONFIG_EXPANDED"
+#
+### Run preprocessing
+#python data/preprocess.py --config "$CONFIG_EXPANDED"
+#
+## Run split_data.py to generate splits and weights
+#python split_data.py --config "$CONFIG_EXPANDED"
 
-# Run preprocessing
-python data/preprocess.py --config "$CONFIG_EXPANDED"
+# Run training
+python train/train.py --config "$CONFIG_EXPANDED"

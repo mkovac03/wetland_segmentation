@@ -35,28 +35,54 @@ def generate_splits_and_weights(config):
     val_ratio = split_cfg.get("val_ratio", 0.1)
     test_ratio = split_cfg.get("test_ratio", 0.1)
 
-    file_list = get_file_list(input_dir)
-    if len(file_list) == 0:
-        raise RuntimeError(f"No input .npy tiles found in {input_dir}")
-
+    # ========== Find valid tiles ==========
     print("[INFO] Collecting label histograms and class presence...")
     X, Y = [], []
+
     hist_dir = os.path.join(input_dir, "label_histograms")
-    for base in tqdm(file_list, desc="Valid histogram tiles"):
-        tile_name = os.path.basename(base)
-        hist_path = os.path.join(hist_dir, f"tile_{tile_name}.json")
-        if not os.path.exists(hist_path):
-            continue
+    tile_ids = set()
+
+    for f in os.listdir(input_dir):
+        if f.endswith("_lbl.npy"):
+            tile_id = f.replace("_lbl.npy", "")
+            img_path = os.path.join(input_dir, f"{tile_id}_img.npy")
+            lbl_path = os.path.join(input_dir, f"{tile_id}_lbl.npy")
+            hist_path = os.path.join(hist_dir, f"{tile_id}.json")
+            if os.path.exists(img_path) and os.path.exists(lbl_path) and os.path.exists(hist_path):
+                tile_ids.add(tile_id)
+
+    print(f"[DEBUG] Valid tile count with img + lbl + hist: {len(tile_ids)}")
+
+    for tile_id in tqdm(sorted(tile_ids), desc="Valid histogram tiles"):
+        hist_path = os.path.join(hist_dir, f"{tile_id}.json")
         with open(hist_path) as f:
-            counts = np.array(json.load(f))
-        if counts.sum() == 0:
+            data = json.load(f)
+            hist = data.get("histogram", {})
+
+        counts = np.zeros(num_classes, dtype=np.int64)
+        for k, v in hist.items():
+            try:
+                k_int = int(k)
+                if 0 <= k_int < num_classes:
+                    counts[k_int] = v
+            except ValueError:
+                continue
+
+        if counts.sum() == 0 or counts[0] == counts.sum():  # only background
             continue
+
         class_presence = (counts > 0).astype(int)
-        X.append(base)
+        X.append(os.path.join(input_dir, f"{tile_id}_img.npy"))
         Y.append(class_presence)
+
+    print(f"[DEBUG] Total usable tiles: {len(X)}")
+
+    if not Y:
+        raise RuntimeError("No valid label histograms found. Check that tiles contain non-empty foreground labels.")
 
     X, Y = np.array(X), np.stack(Y)
 
+    # ========== Stratified Splitting ==========
     msss = MultilabelStratifiedShuffleSplit(n_splits=1, test_size=val_ratio + test_ratio, random_state=seed)
     train_idx, temp_idx = next(msss.split(X, Y))
     X_temp, Y_temp = X[temp_idx], Y[temp_idx]
@@ -74,22 +100,43 @@ def generate_splits_and_weights(config):
         json.dump(splits, f, indent=2)
     print(f"[INFO] Saved splits to {split_path}")
 
+    # ========== Compute Weights ==========
     print("[INFO] Aggregating histograms from label_histograms...")
     pixel_counts = np.zeros(num_classes, dtype=np.int64)
     sample_weights = []
-    for tile in tqdm(splits["train"], desc="Computing class/sample weights"):
-        hist_path = os.path.join(hist_dir, f"tile_{os.path.basename(tile)}.json")
+    for tile_path in tqdm(splits["train"], desc="Computing class/sample weights"):
+        tile_id = os.path.basename(tile_path).replace("_img.npy", "")
+        hist_path = os.path.join(hist_dir, f"{tile_id}.json")
         with open(hist_path) as f:
-            counts = np.array(json.load(f))
+            data = json.load(f)
+            hist = data.get("histogram", {})
+        counts = np.zeros(num_classes, dtype=np.int64)
+        for k, v in hist.items():
+            try:
+                k_int = int(k)
+                if 0 <= k_int < num_classes:
+                    counts[k_int] = v
+            except ValueError:
+                continue
         pixel_counts += counts
 
     class_weights = 1.0 / (pixel_counts + 1e-6)
     class_weights *= (num_classes / class_weights.sum())
 
-    for tile in splits["train"]:
-        hist_path = os.path.join(hist_dir, f"tile_{os.path.basename(tile)}.json")
+    for tile_path in splits["train"]:
+        tile_id = os.path.basename(tile_path).replace("_img.npy", "")
+        hist_path = os.path.join(hist_dir, f"{tile_id}.json")
         with open(hist_path) as f:
-            counts = np.array(json.load(f))
+            data = json.load(f)
+            hist = data.get("histogram", {})
+        counts = np.zeros(num_classes, dtype=np.int64)
+        for k, v in hist.items():
+            try:
+                k_int = int(k)
+                if 0 <= k_int < num_classes:
+                    counts[k_int] = v
+            except ValueError:
+                continue
         present = np.where(counts > 0)[0]
         weights = class_weights[present] if len(present) > 0 else [0.0]
         sample_weights.append(float(np.mean(weights)))
@@ -98,7 +145,9 @@ def generate_splits_and_weights(config):
     os.makedirs(weights_dir, exist_ok=True)
     np.savez(os.path.join(weights_dir, f"weights_{timestamp}_{split_hash}.npz"),
              class_weights=class_weights, sample_weights=sample_weights)
+    print(f"[INFO] Saved weights to {weights_dir}")
 
+# ========== CLI ==========
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()

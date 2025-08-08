@@ -13,8 +13,8 @@ patch_size: 512
 stride: 512
 batch_size: 16
 num_classes: 13
-input_channels: 64
-band_offset: 2  # Skip label band (index 1), start at band 2 (index 1 in rasterio)
+input_channels: 63
+band_offset: 0  # Skip label band (index 1), start at band 2 (index 1 in rasterio)
 
 # ===== Label Remapping =====
 label_remap:
@@ -68,10 +68,10 @@ model:
 
 # ===== Training =====
 training:
-  epochs: 200
+  epochs: 100
   lr: 0.0001
   weight_decay: 0.01
-  use_amp: true
+  use_amp: false
   early_stopping_metric: loss  # or "f1"
   early_stopping_patience: 30
   deterministic: false
@@ -99,14 +99,14 @@ gradient_clipping: 1.0
 # ===== Splitting Strategy =====
 splitting:
   background_threshold: 0.9
-  train_ratio: 0.8
+  train_ratio: 1
   val_ratio: 0.1
   test_ratio: 0.1
   seed: 42
-  entropy_percentile: 80
-  max_training_tiles: 10000
+  entropy_percentile:
+  max_training_tiles: 6000
   stratify_by_utm: true
-  utm_sampling_strategy: "equal"  # or "proportional"
+  utm_sampling_strategy: "equal"  # or "equal"
 
 # ===== Sampling =====
 sampling:
