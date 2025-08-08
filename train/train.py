@@ -340,7 +340,9 @@ for epoch in range(config["training"]["epochs"]):
         model.eval()
         try:
             num_samples = 1
-            fig, axs = plt.subplots(num_samples, 2, figsize=(8, 3 * num_samples))  # 2 columns only
+            fig, axs = plt.subplots(num_samples, 2, figsize=(8, 3 * num_samples))
+            if num_samples == 1:
+                axs = axs[np.newaxis, :]  # Make it 2D
 
             for i in range(num_samples):
                 tile_path = val_ds.file_list[i]
