@@ -29,9 +29,11 @@ sed "s|{now}|$NOW|g" "$CONFIG_SRC" > "$CONFIG_EXPANDED"
 ## Run split_data.py to generate splits and weights
 #python split_data.py --config "$CONFIG_EXPANDED"
 
-# Kill stale processes
+# Kill stale processes safely
 echo "[INFO] Cleaning up previous runs..."
-pkill -f -u "$USER" "train/train.py" || true
+pkill -9 -u "$USER" -f "train/train.py" || true
+pkill -9 -u "$USER" -f "multiprocessing.spawn" || true
+pkill -9 -u "$USER" -f "torch.utils.data" || true
 
 # Run training
 python train/train.py --config "$CONFIG_EXPANDED"

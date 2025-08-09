@@ -308,23 +308,43 @@ for epoch in range(config["training"]["epochs"]):
     writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
 
     # ===== Convert and Save Model Weights if Needed =====
+    SAVE_EVERY = config.get("save_every", 5)
+    VIS_EVERY = config.get("vis_every", 5)  # add to config if you want control
+
     curr_metric = avg_loss if es_metric == "loss" else f1
     improved = curr_metric < best_metric if es_metric == "loss" else curr_metric > best_metric
 
-    if improved:
-        best_metric = curr_metric
-        no_improve = 0
-        print(f"[INFO] New best @ epoch {epoch + 1}, F1={f1:.4f}")
+    should_save = improved or ((epoch + 1) % SAVE_EVERY == 0)
+    should_visual_log = (epoch == 0 or (epoch + 1) % VIS_EVERY == 0) and not should_save
 
-        fp16_weights = convert_to_fp16(model.state_dict())
+    if should_save:
+        best_metric = curr_metric if improved else best_metric
+        no_improve = 0 if improved else no_improve + 1
 
         if is_master_process():
-            torch.save(fp16_weights, os.path.join(config["output_dir"], f"best_model_ep{epoch + 1}_weights.pt"),
-                       _use_new_zipfile_serialization=False)
-            with open(os.path.join(config["output_dir"], "best_epoch.txt"), "w") as f:
-                f.write(f"{epoch + 1},{f1:.4f}\n")
+            log_memory(f"{epoch}-before-save")
 
-        del fp16_weights, acc, miou, f1, avg_loss
+            save_path = (
+                f"best_model_ep{epoch + 1}_weights.pt" if improved
+                else f"model_ep{epoch + 1}_weights.pt"
+            )
+            torch.save(
+                {k: v.half() if v.dtype == torch.float32 else v
+                 for k, v in model.state_dict().items()},
+                os.path.join(config["output_dir"], save_path),
+                _use_new_zipfile_serialization=False
+            )
+
+            if improved:
+                with open(os.path.join(config["output_dir"], "best_epoch.txt"), "w") as f:
+                    f.write(f"{epoch + 1},{f1:.4f}\n")
+
+            log_memory(f"{epoch}-after-save")
+
+        del acc, miou, f1, avg_loss
+        gc.collect()
+        torch.cuda.empty_cache()
+
     else:
         no_improve += 1
         if no_improve >= patience:
@@ -334,12 +354,12 @@ for epoch in range(config["training"]["epochs"]):
     gc.collect()
     torch.cuda.empty_cache()
 
-    # ===== Visual Logging to TensorBoard =====
-    if epoch == 0 or (epoch + 1) % save_every == 0:
+    # ===== Visual Logging to TensorBoard (never same epoch as save) =====
+    if should_visual_log:
         log_memory(f"{epoch}-before-TB")
         model.eval()
         try:
-            num_samples = 1
+            num_samples = 3
             fig, axs = plt.subplots(num_samples, 2, figsize=(8, 3 * num_samples))
             if num_samples == 1:
                 axs = axs[np.newaxis, :]  # Make it 2D
@@ -353,7 +373,6 @@ for epoch in range(config["training"]["epochs"]):
                 with torch.no_grad():
                     pred = model(sample_x).argmax(1).squeeze().cpu()
 
-                # Label distribution printout
                 u, c = np.unique(sample_y.numpy(), return_counts=True)
                 dist_str = ", ".join([f"{int(cls)}: {cnt}" for cls, cnt in zip(u, c)])
                 print(f"[VISUAL LOGGING] {tile_id} → Label Distribution: {dist_str}")
@@ -373,9 +392,9 @@ for epoch in range(config["training"]["epochs"]):
             plt.tight_layout()
             buf = io.BytesIO()
             plt.savefig(buf, format="png")
-            plt.clf()
-            plt.close('all')
+            plt.close(fig)  # close only this fig
             buf.seek(0)
+
             img = Image.open(buf)
             img_tensor = to_tensor(img)
             writer.add_image("Validation/Label_vs_Prediction", img_tensor, global_step=epoch)
@@ -384,6 +403,8 @@ for epoch in range(config["training"]["epochs"]):
             del fig, axs, sample_x, sample_y, pred, img_tensor, img, buf
             gc.collect()
             torch.cuda.empty_cache()
+
+            log_memory(f"{epoch}-after-TB")
 
         except Exception as e:
             print(f"[WARN] TensorBoard image logging failed: {e}")
