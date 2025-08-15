@@ -23,6 +23,7 @@ Usage:
 import os, re, json, argparse, yaml, math, random
 from datetime import datetime
 from collections import defaultdict
+from multiprocessing import Pool, cpu_count
 
 import numpy as np
 from tqdm import tqdm
@@ -296,61 +297,98 @@ def split_stratified_by_utm(keys, r_train, r_val, r_test, seed, strategy, max_tr
 
     return train, val, test
 
-# -------------------- Channel stats (strict nodata mask) --------------------
-def compute_channel_stats(train_keys, inputs_index, exts, nodata_cfg, expected_channels=None):
-    files = [inputs_index[k] for k in train_keys if k in inputs_index]
-    if not files:
-        return {"channels": 0, "mean": [], "std": [], "n_valid": []}
+def _probe_channels(path, nodata_cfg):
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".tif", ".tiff", ".vrt"):
+        with rasterio.open(path) as src:
+            return src.count
+    elif ext == ".npy":
+        arr = np.load(path, mmap_mode="r")
+        return int(arr.shape[0])
+    else:
+        raise ValueError(f"Unsupported input extension: {ext}")
 
-    def get_channels(path):
-        ext = os.path.splitext(path)[1].lower()
-        if ext in (".tif", ".tiff", ".vrt"):
-            with rasterio.open(path) as src:
-                return src.count
-        elif ext == ".npy":
-            arr = np.load(path, mmap_mode="r")
-            return int(arr.shape[0])
-        else:
-            raise ValueError(f"Unsupported input extension: {ext}")
-    C = expected_channels or get_channels(files[0])
-
+def _stats_one_file(args):
+    """Worker: return (sums[C], sumsqs[C], counts[C]) for a single file."""
+    fp, C, nodata_cfg = args
+    ext = os.path.splitext(fp)[1].lower()
     sums = np.zeros(C, dtype=np.float64)
     sumsqs = np.zeros(C, dtype=np.float64)
     counts = np.zeros(C, dtype=np.int64)
 
-    for fp in tqdm(files, desc="Channel stats (TRAIN)"):
-        ext = os.path.splitext(fp)[1].lower()
-        if ext in (".tif", ".tiff", ".vrt"):
-            with rasterio.open(fp) as src:
-                nod = src.nodata if src.nodata is not None else nodata_cfg
-                for i in range(C):
-                    band = src.read(i+1).astype(np.float32)
-                    valid = np.isfinite(band)
-                    if nod is not None:
-                        valid &= (band != nod)
-                    if not np.any(valid):
-                        continue
-                    x = band[valid].astype(np.float64)
-                    sums[i]   += float(x.sum())
-                    sumsqs[i] += float((x * x).sum())
-                    counts[i] += int(valid.sum())
-        elif ext == ".npy":
-            arr = np.load(fp)  # [C,H,W]
-            if arr.ndim != 3 or arr.shape[0] < C:
-                raise ValueError(f"Bad array shape in {fp}: {arr.shape}")
+    if ext in (".tif", ".tiff", ".vrt"):
+        with rasterio.open(fp) as src:
+            nod = src.nodata if src.nodata is not None else nodata_cfg
             for i in range(C):
-                ch = arr[i].astype(np.float32)
-                valid = np.isfinite(ch)
-                if nodata_cfg is not None:
-                    valid &= (ch != nodata_cfg)
+                band = src.read(i+1).astype(np.float32)
+                valid = np.isfinite(band)
+                if nod is not None:
+                    valid &= (band != nod)
                 if not np.any(valid):
                     continue
-                x = ch[valid].astype(np.float64)
+                x = band[valid].astype(np.float64)
                 sums[i]   += float(x.sum())
                 sumsqs[i] += float((x * x).sum())
                 counts[i] += int(valid.sum())
-        else:
-            continue
+    elif ext == ".npy":
+        arr = np.load(fp, mmap_mode="r")  # [C,H,W]
+        if arr.ndim != 3 or arr.shape[0] < C:
+            return sums, sumsqs, counts
+        for i in range(C):
+            ch = arr[i].astype(np.float32)
+            valid = np.isfinite(ch)
+            if nodata_cfg is not None:
+                valid &= (ch != nodata_cfg)
+            if not np.any(valid):
+                continue
+            x = ch[valid].astype(np.float64)
+            sums[i]   += float(x.sum())
+            sumsqs[i] += float((x * x).sum())
+            counts[i] += int(valid.sum())
+    else:
+        # unsupported; return zeros
+        pass
+    # Return small Python lists (pickle-friendly)
+    return sums.tolist(), sumsqs.tolist(), counts.tolist()
+
+
+# -------------------- Channel stats (strict nodata mask) --------------------
+def compute_channel_stats(train_keys, inputs_index, exts, nodata_cfg, expected_channels=None, workers=0):
+    """Parallel channel stats over TRAIN.
+    workers: 0/1 -> single process; -1 -> all cores; N -> exactly N processes.
+    """
+    files = [inputs_index[k] for k in train_keys if k in inputs_index]
+    if not files:
+        return {"channels": 0, "mean": [], "std": [], "n_valid": []}
+
+    # Decide channel count once
+    C = expected_channels or _probe_channels(files[0], nodata_cfg)
+
+    # Accumulators
+    sums   = np.zeros(C, dtype=np.float64)
+    sumsqs = np.zeros(C, dtype=np.float64)
+    counts = np.zeros(C, dtype=np.int64)
+
+    if workers in (0, 1):
+        # single-process (original behavior)
+        for fp in tqdm(files, desc="Channel stats (TRAIN)"):
+            s, sq, ct = _stats_one_file((fp, C, nodata_cfg))
+            sums   += np.asarray(s,  dtype=np.float64)
+            sumsqs += np.asarray(sq, dtype=np.float64)
+            counts += np.asarray(ct, dtype=np.int64)
+    else:
+        nproc = cpu_count() if workers == -1 else max(1, int(workers))
+        # Small chunk to keep workers busy but reduce overhead
+        chunk = 4
+        with Pool(processes=nproc) as pool:
+            for s, sq, ct in tqdm(
+                pool.imap_unordered(_stats_one_file, ((fp, C, nodata_cfg) for fp in files), chunksize=chunk),
+                total=len(files),
+                desc=f"Channel stats (TRAIN) x{nproc}"
+            ):
+                sums   += np.asarray(s,  dtype=np.float64)
+                sumsqs += np.asarray(sq, dtype=np.float64)
+                counts += np.asarray(ct, dtype=np.int64)
 
     means = np.zeros(C, dtype=np.float64)
     stds  = np.zeros(C, dtype=np.float64)
@@ -362,10 +400,14 @@ def compute_channel_stats(train_keys, inputs_index, exts, nodata_cfg, expected_c
             stds[i]  = math.sqrt(var)
         else:
             means[i], stds[i] = 0.0, 1.0  # safe defaults
-    return {"channels": int(C),
-            "mean": [float(x) for x in means],
-            "std":  [float(x) for x in stds],
-            "n_valid": [int(x) for x in counts]}
+    return {
+        "channels": int(C),
+        "mean":  [float(x) for x in means],
+        "std":   [float(x) for x in stds],
+        "n_valid": [int(x) for x in counts],
+        "workers": workers,
+    }
+
 
 # -------------------- Plotting --------------------
 def plot_class_weights(counts, weights, label_names, out_png):
@@ -432,6 +474,8 @@ def main():
     ap.add_argument("--plots-out", default=None, help="directory to save plots; default uses timestamp next to verified file")
     ap.add_argument("--assert-zone-coverage", action="store_true",
                     help="fail if any UTM zone is missing from any split")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="workers for channel stats (0/1=single process, -1=all cores, N=that many)")
     args = ap.parse_args()
 
     cfg = load_cfg(args.config)
@@ -540,7 +584,8 @@ def main():
     if missing_inputs:
         print(f"[WARN] {len(missing_inputs)} train tiles missing in inputs (first 10): {missing_inputs[:10]}")
 
-    norm = compute_channel_stats(train, inputs_index, exts, nodata_cfg, expected_channels=expected_C)
+    norm = compute_channel_stats(train, inputs_index, exts, nodata_cfg,
+                                 expected_channels=expected_C, workers=args.workers)
     meta["normalization"] = norm
 
     # ---- Plots
