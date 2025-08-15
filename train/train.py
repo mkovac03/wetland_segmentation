@@ -514,15 +514,14 @@ for epoch in range(1, epochs + 1):
 
             loss = ft_loss(logits, yb) + ce
 
-            scaler.scale(loss).backward()
-            # unscale before clipping so the norm is correct
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
-            scaler.step(opt)
-            scaler.update()
+        scaler.scale(loss).backward()
+        # unscale before clipping so the norm is correct
+        scaler.unscale_(opt)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
+        scaler.step(opt)
+        scaler.update()
 
         run_loss += float(loss.item())
-
         # cleanup
         del xb, yb, logits, loss, ce, valid_mask
 
@@ -533,7 +532,7 @@ for epoch in range(1, epochs + 1):
     confmat = torch.zeros((num_classes, num_classes), dtype=torch.int64)
     correct, total = 0, 0
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for xb, yb in val_loader:
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
@@ -586,6 +585,8 @@ for epoch in range(1, epochs + 1):
 
     if should_save:
         if improved:
+            with open(os.path.join(outdir, "best_epoch.txt"), "w") as f:
+                f.write(f"{epoch},{best_metric:.6f}\n")
             best_metric = score if es_metric == "loss" else f1
             no_improve = 0
         else:
@@ -617,7 +618,7 @@ for epoch in range(1, epochs + 1):
                 axs = np.array([[axs[0], axs[1]]])
             for i in range(n_show):
                 x, y = val_ds[i]
-                with torch.no_grad():
+                with torch.inference_mode():
                     pred = model(x.unsqueeze(0).to(device)).argmax(1).squeeze(0).cpu()
                 axs[i,0].imshow(y.numpy(), cmap="tab20"); axs[i,0].set_title("Label"); axs[i,0].axis("off")
                 axs[i,1].imshow(pred.numpy(), cmap="tab20"); axs[i,1].set_title("Prediction"); axs[i,1].axis("off")
