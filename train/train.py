@@ -4,7 +4,7 @@ import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # ===== Stdlib / third-party =====
-import re, io, json, yaml, argparse, datetime, gc, subprocess
+import re, io, json, yaml, argparse, datetime, gc, subprocess, platform
 from typing import Tuple, Dict, List
 
 import numpy as np
@@ -27,9 +27,9 @@ from torchvision.transforms.functional import to_tensor
 # ===== Project modules =====
 from data.transform import RandomAugment
 from models.resunet_vit import ResNetUNetViT
-from train.metrics import compute_miou, compute_f1  # kept in case you want to swap back
 from losses.focal_tversky import CombinedFocalTverskyLoss
 from utils.plotting import add_prediction_legend
+from yaml.representer import RepresenterError
 
 # ===== Utilities =====
 def restart_tensorboard(logdir, port=6006):
@@ -59,9 +59,7 @@ def safe_collate(batch):
         raise ValueError("safe_collate: all samples failed.")
     return default_collate(batch)
 
-# Streaming confusion-matrix update (O(1) memory)
 def update_confmat(confmat, preds, target, num_classes, ignore_index):
-    # preds/target: [N,H,W] or [H,W] tensors (CPU or GPU accepted; we move to CPU here)
     if preds.is_cuda: preds = preds.cpu()
     if target.is_cuda: target = target.cpu()
     if preds.ndim == 3:
@@ -77,6 +75,32 @@ def update_confmat(confmat, preds, target, num_classes, ignore_index):
     confmat += binc.view(num_classes, num_classes)
     return confmat
 
+def state_dict_half_cpu(model: torch.nn.Module) -> dict:
+    """Safe checkpoint: params/buffers -> CPU; float tensors cast to fp16."""
+    sd = {}
+    with torch.no_grad():
+        for k, v in model.state_dict().items():
+            t = v.detach().to('cpu', copy=True)
+            if t.is_floating_point():
+                t = t.to(torch.float16)
+            sd[k] = t
+    return sd
+
+def _pyify(obj):
+    """Make any structure JSON/YAML-safe: Python scalars, lists, dicts only."""
+    import numpy as _np
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if isinstance(obj, _np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {str(k): _pyify(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_pyify(v) for v in obj]
+    # fallback: stringify unknown types (Path, Version, enum, etc.)
+    return str(obj)
+
+
 # ===== Argparse / Config =====
 ap = argparse.ArgumentParser()
 ap.add_argument("--config", default="configs/config.yaml")
@@ -90,7 +114,7 @@ args = ap.parse_args()
 with open(args.config, "r") as f:
     cfg = yaml.safe_load(f)
 
-# Device early (avoid per-batch .to(device) churn)
+# Device early
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.backends.cudnn.benchmark = True  # fixed patch shapes → faster convs
 
@@ -113,7 +137,22 @@ test_keys  = list(splits_meta.get("test", []))  # not used here
 patch_size = int(cfg.get("patch_size", 512))
 
 norm_meta  = splits_meta.get("normalization", {})
-class_meta = splits_meta.get("class_stats", {})
+clean_meta = _pyify(run_meta)
+
+# Always write JSON (robust)
+with open(os.path.join(outdir, "run_meta.json"), "w") as f:
+    json.dump(clean_meta, f, indent=2)
+
+# Try YAML to TB; if YAML still complains, fall back to JSON text
+try:
+    tb_yaml = yaml.safe_dump(clean_meta, sort_keys=False, default_flow_style=False)
+    writer.add_text("run/config", f"```yaml\n{tb_yaml}\n```", global_step=0)
+except RepresenterError:
+    writer.add_text("run/config",
+                    "```json\n" + json.dumps(clean_meta, indent=2) + "\n```",
+                    global_step=0)
+except Exception as e:
+    print(f"[WARN] TB config text failed: {e}")
 
 num_classes = int(cfg.get("num_classes", 13))
 ignore_index = int(cfg.get("ignore_val", 255))
@@ -294,9 +333,7 @@ val_transform   = None
 
 batch_size = args.batch_size or int(cfg.get("batch_size", 16))
 epochs     = args.epochs or int(cfg.get("training", {}).get("epochs", 100))
-
-num_workers = int(args.workers)
-num_workers = max(0, min(num_workers, 4))  # cap to 4 to be safe
+num_workers = max(0, min(int(args.workers), 4))  # cap to 4 to be safe
 
 train_ds = KeysDataset(train_keys, inputs_idx, labels_idx, norm_mean_t, norm_std_t,
                        expected_channels=expected_C, transform=train_transform,
@@ -308,7 +345,6 @@ val_ds   = KeysDataset(val_keys, inputs_idx, labels_idx, norm_mean_t, norm_std_t
                        nodata_val=nodata_val, ignore_index=ignore_index,
                        patch_size=patch_size, is_train=False)
 
-# Build dataloaders with minimal buffering to avoid CPU RAM spikes
 def make_loader(ds, batch, shuffle, workers, is_val=False):
     kwargs = dict(
         dataset=ds,
@@ -317,15 +353,10 @@ def make_loader(ds, batch, shuffle, workers, is_val=False):
         num_workers=workers,
         pin_memory=True,
         collate_fn=safe_collate,
-        drop_last=not is_val,  # <— drop last for train
+        drop_last=not is_val,  # drop last for train to keep shapes stable
     )
-
-    # Only set these when workers>0 (PyTorch warns otherwise)
     if workers > 0:
-        kwargs.update(dict(
-            prefetch_factor=1,
-            persistent_workers=False
-        ))
+        kwargs.update(dict(prefetch_factor=1, persistent_workers=False))
     return DataLoader(**kwargs)
 
 train_loader = make_loader(train_ds, batch_size, True,  num_workers, is_val=False)
@@ -364,29 +395,87 @@ best_metric = float("inf") if es_metric == "loss" else -1.0
 patience = int(cfg["training"].get("early_stopping_patience", 30))
 no_improve = 0
 
-sch_cfg = cfg.get("scheduler", {"mode": "reduce_on_plateau", "patience": 10})
+# ===== Scheduler (read from training.* keys) =====
+sch_name = str(cfg["training"].get("scheduler", "reduce_on_plateau"))
+sch_pat  = int(cfg["training"].get("scheduler_patience", 10))
+sch_fac  = float(cfg["training"].get("scheduler_factor", 0.5))
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     opt,
     mode="min" if es_metric == "loss" else "max",
-    factor=float(sch_cfg.get("factor", 0.5)),
-    patience=int(sch_cfg.get("patience", 10))
+    factor=sch_fac,
+    patience=sch_pat
 )
 
-def state_dict_half_cpu(model: torch.nn.Module) -> dict:
-    """Safe checkpoint: move params/buffers to CPU, cast float tensors to fp16."""
-    sd = {}
-    with torch.no_grad():
-        for k, v in model.state_dict().items():
-            t = v.detach().to('cpu', copy=True)
-            if t.is_floating_point():
-                t = t.to(torch.float16)
-            sd[k] = t
-    return sd
+# ===== Run metadata / config logging (AFTER model exists) =====
+def _count_params(m: torch.nn.Module):
+    tot = sum(p.numel() for p in m.parameters())
+    trn = sum(p.numel() for p in m.parameters() if p.requires_grad)
+    return int(tot), int(trn)
 
+def _git_info():
+    info = {"commit": "unknown", "dirty": False}
+    try:
+        c = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
+        s = subprocess.check_output(["git", "status", "--porcelain"], stderr=subprocess.DEVNULL).decode()
+        info["commit"], info["dirty"] = c, (len(s.strip()) > 0)
+    except Exception:
+        pass
+    return info
+
+_total, _trainable = _count_params(model)
+run_meta = {
+    "time": datetime.datetime.now().isoformat(timespec="seconds"),
+    "device": str(device),
+    "torch": torch.__version__,
+    "cuda": torch.version.cuda if torch.cuda.is_available() else "none",
+    "cudnn_benchmark": torch.backends.cudnn.benchmark,
+    "python": platform.python_version(),
+    "platform": platform.platform(),
+    "git": _git_info(),
+    "data": {"num_classes": num_classes, "channels": expected_C,
+             "patch_size": patch_size, "n_train": len(train_keys), "n_val": len(val_keys)},
+    "model": cfg.get("model", {}),
+    "training": {
+        "epochs": epochs,
+        "lr": float(cfg["training"].get("lr", 1e-4)),
+        "weight_decay": float(cfg["training"].get("weight_decay", 0.01)),
+        "use_amp": use_amp,
+        "early_stopping_metric": es_metric,
+        "early_stopping_patience": patience,
+        "grad_clip": float(cfg.get("gradient_clipping", 1.0)),
+        "scheduler": {"name": sch_name, "patience": sch_pat, "factor": sch_fac},
+        "batch_size": batch_size,
+        "workers": num_workers,
+    },
+    "loss": cfg.get("loss", {}),
+    "splitting": cfg.get("splitting", {}),
+    "class_weights_summary": {
+        "min": float(class_weights.min().item()),
+        "max": float(class_weights.max().item()),
+        "mean": float(class_weights.mean().item()),
+    },
+    "model_params": {"total": _total, "trainable": _trainable},
+}
+try:
+    with open(os.path.join(outdir, "run_meta.json"), "w") as f:
+        json.dump(run_meta, f, indent=2)
+    writer.add_text("run/config", "```yaml\n" + yaml.safe_dump(run_meta, sort_keys=False) + "\n```", 0)
+    # lightweight hparams
+    hp = {
+        "model.encoder": str(cfg.get("model", {}).get("encoder", "resnet34")),
+        "training.lr": run_meta["training"]["lr"],
+        "training.weight_decay": run_meta["training"]["weight_decay"],
+        "training.scheduler": sch_name,
+        "data.patch_size": patch_size,
+        "data.channels": expected_C,
+    }
+    writer.add_hparams(hp, {"init/best_loss": 0.0, "init/best_f1": 0.0})
+except Exception as e:
+    print(f"[WARN] metadata logging failed: {e}")
 
 # ===== Training loop =====
 SAVE_EVERY = int(cfg.get("logging", {}).get("checkpoint_interval", 5))
-VIS_EVERY  = int(cfg.get("logging", {}).get("eval_interval", 1))  # we use it as visual cadence
+VIS_EVERY  = int(cfg.get("logging", {}).get("eval_interval", 1))  # visualization cadence
 clip_val   = float(cfg.get("gradient_clipping", 1.0))
 
 log_f = open(os.path.join(outdir, "training_log.csv"), "a", buffering=1)
@@ -418,10 +507,10 @@ for epoch in range(1, epochs + 1):
 
             loss = ft_loss(logits, yb) + ce
 
-        scaler.scale(loss).backward()
+        GradScaler(enabled=use_amp).scale(loss).backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
-        scaler.step(opt)
-        scaler.update()
+        GradScaler(enabled=use_amp).step(opt)
+        GradScaler(enabled=use_amp).update()
 
         run_loss += float(loss.item())
 
@@ -482,7 +571,9 @@ for epoch in range(1, epochs + 1):
 
     improved = (score < best_metric) if es_metric == "loss" else (f1 > best_metric)
     should_save = improved or (epoch % SAVE_EVERY == 0)
-    should_visual_log = (epoch % max(VIS_EVERY, 5) == 0) and not should_save
+    # don't spam TB with images; space them out and skip when saving
+    vis_stride = max(VIS_EVERY, 5)
+    should_visual_log = (epoch % vis_stride == 0) and not should_save
 
     if should_save:
         best_metric = score if es_metric == "loss" else (f1 if improved else best_metric)
@@ -536,8 +627,8 @@ for epoch in range(1, epochs + 1):
             except Exception: pass
             del img, buf
             torch.cuda.empty_cache(); gc.collect()
-    torch.cuda.empty_cache();
-    gc.collect()
+
+    torch.cuda.empty_cache(); gc.collect()
 
 # ===== Cleanup =====
 log_f.close()
