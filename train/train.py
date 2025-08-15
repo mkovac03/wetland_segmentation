@@ -515,6 +515,8 @@ for epoch in range(1, epochs + 1):
             loss = ft_loss(logits, yb) + ce
 
             scaler.scale(loss).backward()
+            # unscale before clipping so the norm is correct
+            scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
             scaler.step(opt)
             scaler.update()
@@ -583,12 +585,18 @@ for epoch in range(1, epochs + 1):
     should_visual_log = (epoch % vis_stride == 0) and not should_save
 
     if should_save:
-        best_metric = score if es_metric == "loss" else (f1 if improved else best_metric)
-        no_improve = 0 if improved else (no_improve + 1)
+        if improved:
+            best_metric = score if es_metric == "loss" else f1
+            no_improve = 0
+        else:
+            no_improve += 1
         fname = ("best_model_ep%03d.pt" % epoch) if improved else ("model_ep%03d.pt" % epoch)
         try:
             state = state_dict_half_cpu(model)
-            torch.save(state, os.path.join(outdir, fname), _use_new_zipfile_serialization=False)
+            tmp_path = os.path.join(outdir, fname + ".tmp")
+            final_path = os.path.join(outdir, fname)
+            torch.save(state, tmp_path, _use_new_zipfile_serialization=False)
+            os.replace(tmp_path, final_path)
             del state
         except Exception as e:
             print(f"[WARN] checkpoint save failed: {e}")
