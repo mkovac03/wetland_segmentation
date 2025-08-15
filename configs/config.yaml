@@ -107,7 +107,7 @@ splitting:
   test_ratio: 0.1
   seed: 42
   entropy_percentile:
-  max_training_tiles: 6000
+  max_training_tiles: 10000
   stratify_by_utm: true
   utm_sampling_strategy: "equal"  # or "equal"
 select:

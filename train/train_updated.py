@@ -27,7 +27,7 @@ from data.transform import RandomAugment
 from models.resunet_vit import ResNetUNetViT
 from train.metrics import compute_miou, compute_f1
 from losses.focal_tversky import CombinedFocalTverskyLoss
-from split_data import generate_splits_and_weights
+from tools.split_data import generate_splits_and_weights
 import argparse
 import gc
 
