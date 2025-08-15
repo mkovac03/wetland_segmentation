@@ -4,7 +4,7 @@ import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # ===== Stdlib / third-party =====
-import re, io, json, yaml, argparse, datetime, hashlib, gc, subprocess
+import re, io, json, yaml, argparse, datetime, gc, subprocess
 from typing import Tuple, Dict, List
 
 import numpy as np
@@ -27,11 +27,11 @@ from torchvision.transforms.functional import to_tensor
 # ===== Project modules =====
 from data.transform import RandomAugment
 from models.resunet_vit import ResNetUNetViT
-from train.metrics import compute_miou, compute_f1
+from train.metrics import compute_miou, compute_f1  # kept in case you want to swap back
 from losses.focal_tversky import CombinedFocalTverskyLoss
 from utils.plotting import add_prediction_legend
 
-# ===== Utilities (optional GPU/RAM logging; safe if NVML missing) =====
+# ===== Utilities =====
 def restart_tensorboard(logdir, port=6006):
     try:
         out = subprocess.check_output(["pgrep", "-f", f"tensorboard.*{logdir}"])
@@ -59,6 +59,24 @@ def safe_collate(batch):
         raise ValueError("safe_collate: all samples failed.")
     return default_collate(batch)
 
+# Streaming confusion-matrix update (O(1) memory)
+def update_confmat(confmat, preds, target, num_classes, ignore_index):
+    # preds/target: [N,H,W] or [H,W] tensors (CPU or GPU accepted; we move to CPU here)
+    if preds.is_cuda: preds = preds.cpu()
+    if target.is_cuda: target = target.cpu()
+    if preds.ndim == 3:
+        preds  = preds.reshape(-1)
+        target = target.reshape(-1)
+    valid = (target != ignore_index) & (target >= 0) & (target < num_classes)
+    if not torch.any(valid):
+        return confmat
+    t = target[valid].to(torch.int64)
+    p = preds[valid].to(torch.int64)
+    k = t * num_classes + p
+    binc = torch.bincount(k, minlength=num_classes * num_classes)
+    confmat += binc.view(num_classes, num_classes)
+    return confmat
+
 # ===== Argparse / Config =====
 ap = argparse.ArgumentParser()
 ap.add_argument("--config", default="configs/config.yaml")
@@ -72,11 +90,14 @@ args = ap.parse_args()
 with open(args.config, "r") as f:
     cfg = yaml.safe_load(f)
 
+# Device early (avoid per-batch .to(device) churn)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.backends.cudnn.benchmark = True  # fixed patch shapes → faster convs
+
 # Resolve output directory
 now_token = re.search(r"(\d{8}_\d{6})", os.path.basename(args.splits))
 timestamp = now_token.group(1) if now_token else datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-outdir = args.out or cfg.get("output_dir", f"outputs/{timestamp}")
-outdir = outdir.replace("{now}", timestamp)
+outdir = (args.out or cfg.get("output_dir", f"outputs/{timestamp}")).replace("{now}", timestamp)
 os.makedirs(outdir, exist_ok=True)
 
 print("[DEBUG] Training start:", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -88,7 +109,8 @@ with open(args.splits, "r") as f:
 
 train_keys = list(splits_meta.get("train", []))
 val_keys   = list(splits_meta.get("val", []))
-test_keys  = list(splits_meta.get("test", []))  # not used here, but available
+test_keys  = list(splits_meta.get("test", []))  # not used here
+patch_size = int(cfg.get("patch_size", 512))
 
 norm_meta  = splits_meta.get("normalization", {})
 class_meta = splits_meta.get("class_stats", {})
@@ -98,12 +120,12 @@ ignore_index = int(cfg.get("ignore_val", 255))
 nodata_val   = cfg.get("nodata_val", None)
 expected_C   = int(cfg.get("input_channels", 64))
 
-# class weights from JSON
+# class weights from JSON → tensor on device once
 cw_values = class_meta.get("weights", {}).get("values", {})
-# convert dict with string keys → ordered list
 class_weights = torch.tensor(
     [float(cw_values.get(str(i), 1.0)) for i in range(num_classes)],
-    dtype=torch.float32
+    dtype=torch.float32,
+    device=device
 )
 
 # normalization tensors
@@ -155,7 +177,6 @@ train_keys = resolve_overlap(train_keys)
 val_keys   = resolve_overlap(val_keys)
 
 print(f"[INFO] Resolved: train={len(train_keys)}  val={len(val_keys)}")
-
 if len(train_keys) == 0 or len(val_keys) == 0:
     raise RuntimeError("No overlapping tiles between inputs and labels for train/val.")
 
@@ -163,17 +184,19 @@ if len(train_keys) == 0 or len(val_keys) == 0:
 class KeysDataset(Dataset):
     def __init__(self, keys, inputs_idx, labels_idx, mean_t, std_t,
                  expected_channels=expected_C, transform=None,
-                 nodata_val=nodata_val, ignore_index=ignore_index):
+                 nodata_val=nodata_val, ignore_index=ignore_index,
+                 patch_size=512, is_train=True):
         self.keys = list(keys)
         self.inputs_idx = inputs_idx
         self.labels_idx = labels_idx
-        self.mean_t = mean_t.float()
-        self.std_t  = std_t.float()
+        self.mean_t = mean_t.float()         # [C,1,1]
+        self.std_t  = std_t.float()          # [C,1,1]
         self.expected_channels = expected_channels
         self.transform = transform
         self.nodata_val = nodata_val
         self.ignore_index = ignore_index
-        # keep file paths for TB previews
+        self.patch_size = int(patch_size)
+        self.is_train = bool(is_train)
         self.file_list = [self.inputs_idx[k] for k in self.keys]
 
     def __len__(self): return len(self.keys)
@@ -189,25 +212,26 @@ class KeysDataset(Dataset):
             nod = self.nodata_val
         else:
             raise ValueError(f"Unsupported input ext: {ext}")
+
         if arr.ndim != 3:
             raise ValueError(f"Input must be [C,H,W], got {arr.shape} at {path}")
         if arr.shape[0] < self.expected_channels:
             raise ValueError(f"Channels<{self.expected_channels} in {path}: {arr.shape}")
+
         x = arr[:self.expected_channels].astype(np.float32)
 
-        # mask nodata/NaN → fill with channel mean so it normalizes to ~0
+        # mask nodata/NaN → fill with per-channel mean so it normalizes to ~0
         mask = ~np.isfinite(x)
         if nod is not None:
             mask |= (x == nod)
         if mask.any():
-            # broadcast per-channel means
-            ch_means = self.mean_t.numpy().astype(np.float32)
-            for c in range(x.shape[0]):
-                x[c][mask[c]] = ch_means[c]
-        t = torch.from_numpy(x)
+            fill = self.mean_t.view(-1, 1, 1).numpy().astype(np.float32)  # [C,1,1]
+            x = np.where(mask, fill, x)
+
         # normalize
+        t = torch.from_numpy(x)
         t = (t - self.mean_t) / (self.std_t + 1e-6)
-        return t
+        return t  # [C,H,W] tensor
 
     def _read_label(self, path: str) -> torch.Tensor:
         with rasterio.open(path) as src:
@@ -216,16 +240,51 @@ class KeysDataset(Dataset):
         y = y.astype(np.int64)
         if nod is not None:
             y[y == nod] = self.ignore_index
-        return torch.from_numpy(y)
+        return torch.from_numpy(y)  # [H,W]
+
+    def _pad_to_min_size(self, x: torch.Tensor, y: torch.Tensor, ps: int):
+        _, H, W = x.shape
+        pad_h = max(0, ps - H)
+        pad_w = max(0, ps - W)
+        if pad_h == 0 and pad_w == 0:
+            return x, y
+
+        top  = pad_h // 2
+        bot  = pad_h - top
+        left = pad_w // 2
+        right= pad_w - left
+
+        # inputs already normalized → 0 is neutral
+        x = torch.nn.functional.pad(x, (left, right, top, bot), mode="constant", value=0.0)
+        y = torch.nn.functional.pad(y, (left, right, top, bot), mode="constant", value=self.ignore_index)
+        return x, y
+
+    def _crop_pair(self, x: torch.Tensor, y: torch.Tensor, ps: int):
+        x, y = self._pad_to_min_size(x, y, ps)
+        _, H, W = x.shape
+        if H == ps and W == ps:
+            return x, y
+        if self.is_train:
+            i = np.random.randint(0, H - ps + 1)
+            j = np.random.randint(0, W - ps + 1)
+        else:
+            i = (H - ps) // 2
+            j = (W - ps) // 2
+        x = x[:, i:i+ps, j:j+ps]
+        y = y[i:i+ps, j:j+ps]
+        return x, y
 
     def __getitem__(self, idx):
         k = self.keys[idx]
         xin = self.inputs_idx[k]
         ylb = self.labels_idx[k]
-        x = self._read_input(xin)
-        y = self._read_label(ylb)
+
+        x = self._read_input(xin)   # [C,H,W]
+        y = self._read_label(ylb)   # [H,W]
+
+        x, y = self._crop_pair(x, y, self.patch_size)
+
         if self.transform is not None:
-            # Expect transform to take (x,y) tensors and return transformed (x,y)
             x, y = self.transform(x, y)
         return x, y
 
@@ -235,25 +294,42 @@ val_transform   = None
 
 batch_size = args.batch_size or int(cfg.get("batch_size", 16))
 epochs     = args.epochs or int(cfg.get("training", {}).get("epochs", 100))
-num_workers= int(args.workers)
+
+num_workers = int(args.workers)
+num_workers = max(0, min(num_workers, 4))  # cap to 4 to be safe
 
 train_ds = KeysDataset(train_keys, inputs_idx, labels_idx, norm_mean_t, norm_std_t,
                        expected_channels=expected_C, transform=train_transform,
-                       nodata_val=nodata_val, ignore_index=ignore_index)
+                       nodata_val=nodata_val, ignore_index=ignore_index,
+                       patch_size=patch_size, is_train=True)
+
 val_ds   = KeysDataset(val_keys, inputs_idx, labels_idx, norm_mean_t, norm_std_t,
                        expected_channels=expected_C, transform=val_transform,
-                       nodata_val=nodata_val, ignore_index=ignore_index)
+                       nodata_val=nodata_val, ignore_index=ignore_index,
+                       patch_size=patch_size, is_train=False)
 
-train_loader = DataLoader(
-    train_ds, batch_size=batch_size, shuffle=True,
-    num_workers=num_workers, pin_memory=True, prefetch_factor=2,
-    persistent_workers=(num_workers > 0), collate_fn=safe_collate
-)
-val_loader = DataLoader(
-    val_ds, batch_size=batch_size, shuffle=False,
-    num_workers=num_workers, pin_memory=True, prefetch_factor=2,
-    persistent_workers=(num_workers > 0), collate_fn=safe_collate
-)
+# Build dataloaders with minimal buffering to avoid CPU RAM spikes
+def make_loader(ds, batch, shuffle, workers, is_val=False):
+    kwargs = dict(
+        dataset=ds,
+        batch_size=batch,
+        shuffle=shuffle,
+        num_workers=workers,
+        pin_memory=True,
+        collate_fn=safe_collate,
+        drop_last=not is_val,  # <— drop last for train
+    )
+
+    # Only set these when workers>0 (PyTorch warns otherwise)
+    if workers > 0:
+        kwargs.update(dict(
+            prefetch_factor=1,
+            persistent_workers=False
+        ))
+    return DataLoader(**kwargs)
+
+train_loader = make_loader(train_ds, batch_size, True,  num_workers, is_val=False)
+val_loader   = make_loader(val_ds,   batch_size, False, min(num_workers, 2), is_val=True)
 
 print(f"[INFO] Loaded: train batches={len(train_loader)}  val batches={len(val_loader)}")
 
@@ -261,10 +337,9 @@ print(f"[INFO] Loaded: train batches={len(train_loader)}  val batches={len(val_l
 tb_cfg = cfg.get("tensorboard", {})
 if tb_cfg.get("restart", True):
     restart_tensorboard(outdir, port=int(tb_cfg.get("port", 6006)))
-writer = SummaryWriter(log_dir=outdir)
+writer = SummaryWriter(log_dir=outdir, flush_secs=30, max_queue=10)
 
 # ===== Model / Optim / Loss =====
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model  = ResNetUNetViT(cfg).to(device)
 
 opt = optim.AdamW(model.parameters(),
@@ -280,8 +355,6 @@ ft_loss = CombinedFocalTverskyLoss(
     tversky_beta=float(cfg["loss"]["tversky"]["beta"]),
     ignore_index=ignore_index
 )
-
-ce_loss = nn.CrossEntropyLoss(weight=class_weights.to(device), ignore_index=ignore_index)
 
 use_amp = bool(cfg["training"].get("use_amp", False))
 scaler  = GradScaler(enabled=use_amp)
@@ -299,12 +372,24 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     patience=int(sch_cfg.get("patience", 10))
 )
 
+def state_dict_half_cpu(model: torch.nn.Module) -> dict:
+    """Safe checkpoint: move params/buffers to CPU, cast float tensors to fp16."""
+    sd = {}
+    with torch.no_grad():
+        for k, v in model.state_dict().items():
+            t = v.detach().to('cpu', copy=True)
+            if t.is_floating_point():
+                t = t.to(torch.float16)
+            sd[k] = t
+    return sd
+
+
 # ===== Training loop =====
 SAVE_EVERY = int(cfg.get("logging", {}).get("checkpoint_interval", 5))
 VIS_EVERY  = int(cfg.get("logging", {}).get("eval_interval", 1))  # we use it as visual cadence
 clip_val   = float(cfg.get("gradient_clipping", 1.0))
 
-log_f = open(os.path.join(outdir, "training_log.csv"), "a")
+log_f = open(os.path.join(outdir, "training_log.csv"), "a", buffering=1)
 if log_f.tell() == 0:
     log_f.write("epoch,loss,acc,miou,f1,lr\n"); log_f.flush()
 
@@ -318,17 +403,19 @@ for epoch in range(1, epochs + 1):
         opt.zero_grad(set_to_none=True)
         with autocast(device_type="cuda", enabled=use_amp):
             logits = model(xb)
-            # combine losses: Focal+Tversky (full) + CE on valid pixels
+
+            # CE on valid pixels only, using pre-moved class_weights
             valid_mask = (yb != ignore_index) & (yb >= 0) & (yb < num_classes)
             if valid_mask.any():
                 ce = nn.functional.cross_entropy(
                     logits.permute(0,2,3,1)[valid_mask],
                     yb[valid_mask],
-                    weight=class_weights.to(device),
+                    weight=class_weights,
                     ignore_index=ignore_index
                 )
             else:
                 ce = torch.tensor(0.0, device=device)
+
             loss = ft_loss(logits, yb) + ce
 
         scaler.scale(loss).backward()
@@ -338,29 +425,45 @@ for epoch in range(1, epochs + 1):
 
         run_loss += float(loss.item())
 
+        # cleanup
         del xb, yb, logits, loss, ce, valid_mask
-        torch.cuda.empty_cache(); gc.collect()
 
     avg_loss = run_loss / max(1, len(train_loader))
 
-    # ===== Validation =====
+    # ===== Validation (streaming, O(1) memory) =====
     model.eval()
+    confmat = torch.zeros((num_classes, num_classes), dtype=torch.int64)
     correct, total = 0, 0
-    preds_all, labels_all = [], []
+
     with torch.no_grad():
         for xb, yb in val_loader:
-            xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
             logits = model(xb)
             pred = logits.argmax(1)
-            preds_all.append(pred.cpu())
-            labels_all.append(yb.cpu())
-            correct += (pred == yb).sum().item()
-            total   += yb.numel()
+
+            valid = (yb != ignore_index) & (yb >= 0) & (yb < num_classes)
+            correct += (pred[valid] == yb[valid]).sum().item()
+            total   += valid.sum().item()
+
+            confmat = update_confmat(confmat, pred.detach(), yb.detach(), num_classes, ignore_index)
+
             del xb, yb, logits, pred
-    acc  = correct / max(1, total)
-    miou = compute_miou(preds_all, labels_all, num_classes)
-    f1   = compute_f1(preds_all, labels_all, num_classes)
-    del preds_all, labels_all
+
+    # derive mIoU and F1 from confmat (CPU)
+    tp = confmat.diag().to(torch.float64)
+    fp = confmat.sum(0).to(torch.float64) - tp
+    fn = confmat.sum(1).to(torch.float64) - tp
+    den = tp + fp + fn + 1e-9
+    iou_per_class = tp / den
+    miou = torch.nanmean(iou_per_class).item()
+
+    precision = tp / (tp + fp + 1e-9)
+    recall    = tp / (tp + fn + 1e-9)
+    f1_per_class = (2 * precision * recall) / (precision + recall + 1e-9)
+    f1 = torch.nanmean(f1_per_class).item()
+
+    acc = correct / max(1, total)
 
     # Logging
     lr = opt.param_groups[0]["lr"]
@@ -379,19 +482,18 @@ for epoch in range(1, epochs + 1):
 
     improved = (score < best_metric) if es_metric == "loss" else (f1 > best_metric)
     should_save = improved or (epoch % SAVE_EVERY == 0)
-    should_visual_log = ((epoch % VIS_EVERY == 0) or epoch == 1) and not should_save
+    should_visual_log = (epoch % max(VIS_EVERY, 5) == 0) and not should_save
 
     if should_save:
         best_metric = score if es_metric == "loss" else (f1 if improved else best_metric)
         no_improve = 0 if improved else (no_improve + 1)
-
-        state = {k: (v.half() if v.dtype == torch.float32 else v) for k, v in model.state_dict().items()}
         fname = ("best_model_ep%03d.pt" % epoch) if improved else ("model_ep%03d.pt" % epoch)
-        torch.save(state, os.path.join(outdir, fname), _use_new_zipfile_serialization=False)
-
-        if improved:
-            with open(os.path.join(outdir, "best_epoch.txt"), "w") as bf:
-                bf.write(f"{epoch},{best_metric:.6f}\n")
+        try:
+            state = state_dict_half_cpu(model)
+            torch.save(state, os.path.join(outdir, fname), _use_new_zipfile_serialization=False)
+            del state
+        except Exception as e:
+            print(f"[WARN] checkpoint save failed: {e}")
     else:
         no_improve += 1
         if no_improve >= patience:
@@ -400,6 +502,7 @@ for epoch in range(1, epochs + 1):
 
     # ===== Visualize ONLY when not saving this epoch =====
     if should_visual_log:
+        fig = buf = img = None
         try:
             model.eval()
             n_show = min(3, len(val_ds))
@@ -412,13 +515,29 @@ for epoch in range(1, epochs + 1):
                     pred = model(x.unsqueeze(0).to(device)).argmax(1).squeeze(0).cpu()
                 axs[i,0].imshow(y.numpy(), cmap="tab20"); axs[i,0].set_title("Label"); axs[i,0].axis("off")
                 axs[i,1].imshow(pred.numpy(), cmap="tab20"); axs[i,1].set_title("Prediction"); axs[i,1].axis("off")
+                del x, y, pred
             add_prediction_legend(axs[-1,1], num_classes, cfg.get("label_names", {}))
             plt.tight_layout()
-            buf = io.BytesIO(); plt.savefig(buf, format="png"); plt.close(fig); buf.seek(0)
-            img = Image.open(buf); writer.add_image("Val/Label_vs_Pred", to_tensor(img), global_step=epoch)
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png")
+            plt.close(fig); fig = None
+            buf.seek(0)
+            img = Image.open(buf)
+            writer.add_image("Val/Label_vs_Pred", to_tensor(img), global_step=epoch)
             writer.flush()
         except Exception as e:
             print(f"[WARN] TensorBoard visualization failed: {e}")
+        finally:
+            try:
+                if img is not None: img.close()
+            except Exception: pass
+            try:
+                if buf is not None: buf.close()
+            except Exception: pass
+            del img, buf
+            torch.cuda.empty_cache(); gc.collect()
+    torch.cuda.empty_cache();
+    gc.collect()
 
 # ===== Cleanup =====
 log_f.close()
