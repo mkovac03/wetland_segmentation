@@ -573,24 +573,27 @@ for epoch in range(1, epochs + 1):
     writer.add_scalar("F1/val", f1, epoch)
     writer.add_scalar("LR", lr, epoch)
 
-    # Scheduler + early stopping
+    # ===== Scheduler + early stopping =====
     score = avg_loss if es_metric == "loss" else f1
-    scheduler.step(score if es_metric == "loss" else f1)
+    scheduler.step(score)
 
-    improved = (score < best_metric) if es_metric == "loss" else (f1 > best_metric)
+    improved = (score < best_metric) if es_metric == "loss" else (score > best_metric)
     should_save = improved or (epoch % SAVE_EVERY == 0)
+
     # don't spam TB with images; space them out and skip when saving
     vis_stride = max(VIS_EVERY, 5)
     should_visual_log = (epoch % vis_stride == 0) and not should_save
 
     if should_save:
         if improved:
+            new_best = score  # avg_loss or f1, depending on es_metric
             with open(os.path.join(outdir, "best_epoch.txt"), "w") as f:
-                f.write(f"{epoch},{best_metric:.6f}\n")
-            best_metric = score if es_metric == "loss" else f1
+                f.write(f"{epoch},{new_best:.6f}\n")
+            best_metric = new_best
             no_improve = 0
         else:
             no_improve += 1
+
         fname = ("best_model_ep%03d.pt" % epoch) if improved else ("model_ep%03d.pt" % epoch)
         try:
             state = state_dict_half_cpu(model)
