@@ -19,6 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.amp import autocast, GradScaler
 
 import rasterio
+from rasterio.windows import Window
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -85,6 +86,18 @@ def state_dict_half_cpu(model: torch.nn.Module) -> dict:
                 t = t.to(torch.float16)
             sd[k] = t
     return sd
+
+def update_confmat_gpu(confmat, preds, target, num_classes, ignore_index):
+    """GPU-side streaming confusion-matrix update."""
+    valid = (target != ignore_index) & (target >= 0) & (target < num_classes)
+    if valid.any():
+        t = target[valid].to(torch.int64)
+        p = preds[valid].to(torch.int64)
+        k = t * num_classes + p
+        binc = torch.bincount(k, minlength=num_classes * num_classes)
+        confmat += binc.view(num_classes, num_classes)
+    return confmat
+
 
 # ===== Argparse / Config =====
 ap = argparse.ArgumentParser()
@@ -251,6 +264,56 @@ class KeysDataset(Dataset):
             y[y == nod] = self.ignore_index
         return torch.from_numpy(y)  # [H,W]
 
+    def _read_pair_windowed(self, xin: str, ylb: str, ps: int):
+        # Read label size to pick a crop
+        with rasterio.open(ylb) as ly:
+            H, W = ly.height, ly.width
+
+        if self.is_train:
+            i = np.random.randint(0, max(1, H - ps + 1))
+            j = np.random.randint(0, max(1, W - ps + 1))
+        else:
+            i = (H - ps) // 2
+            j = (W - ps) // 2
+
+        win = Window(j, i, ps, ps)
+
+        # Inputs
+        if xin.lower().endswith(".npy"):
+            arr = np.load(xin, mmap_mode="r")  # [C,H,W]
+            x = arr[:self.expected_channels, i:i + ps, j:j + ps].astype(np.float32)
+            nod = self.nodata_val
+        else:
+            with rasterio.open(xin) as sx:
+                nod = sx.nodata
+                x = sx.read(
+                    indexes=list(range(1, self.expected_channels + 1)),
+                    window=win,
+                    boundless=True,
+                    fill_value=nod if nod is not None else 0
+                ).astype(np.float32)
+
+        # Labels
+        with rasterio.open(ylb) as sy:
+            y = sy.read(
+                1, window=win, boundless=True,
+                fill_value=self.ignore_index
+            ).astype(np.int64)
+
+        # Handle NaN/nodata → per-channel mean so it normalizes to ~0
+        mask = ~np.isfinite(x)
+        if nod is not None:
+            mask |= (x == nod)
+        if mask.any():
+            fill = self.mean_t.view(-1, 1, 1).numpy().astype(np.float32)
+            x = np.where(mask, fill, x)
+
+        # Normalize
+        xt = torch.from_numpy(x)
+        xt = (xt - self.mean_t) / (self.std_t + 1e-6)
+        yt = torch.from_numpy(y)
+        return xt, yt
+
     def _pad_to_min_size(self, x: torch.Tensor, y: torch.Tensor, ps: int):
         _, H, W = x.shape
         pad_h = max(0, ps - H)
@@ -288,10 +351,8 @@ class KeysDataset(Dataset):
         xin = self.inputs_idx[k]
         ylb = self.labels_idx[k]
 
-        x = self._read_input(xin)   # [C,H,W]
-        y = self._read_label(ylb)   # [H,W]
-
-        x, y = self._crop_pair(x, y, self.patch_size)
+        # Read only the needed window (faster than full read + crop)
+        x, y = self._read_pair_windowed(xin, ylb, self.patch_size)
 
         if self.transform is not None:
             x, y = self.transform(x, y)
@@ -303,7 +364,7 @@ val_transform   = None
 
 batch_size = args.batch_size or int(cfg.get("batch_size", 16))
 epochs     = args.epochs or int(cfg.get("training", {}).get("epochs", 100))
-num_workers = max(0, min(int(args.workers), 4))  # cap to 4 to be safe
+num_workers = max(0, int(args.workers))
 
 train_ds = KeysDataset(train_keys, inputs_idx, labels_idx, norm_mean_t, norm_std_t,
                        expected_channels=expected_C, transform=train_transform,
@@ -326,8 +387,12 @@ def make_loader(ds, batch, shuffle, workers, is_val=False):
         drop_last=not is_val,  # drop last for train to keep shapes stable
     )
     if workers > 0:
-        kwargs.update(dict(prefetch_factor=1, persistent_workers=False))
+        kwargs.update(dict(
+            prefetch_factor=2,      # overlap next 2 batches
+            persistent_workers=True # keep workers alive across epochs
+        ))
     return DataLoader(**kwargs)
+
 
 train_loader = make_loader(train_ds, batch_size, True,  num_workers, is_val=False)
 val_loader   = make_loader(val_ds,   batch_size, False, min(num_workers, 2), is_val=True)
@@ -529,7 +594,7 @@ for epoch in range(1, epochs + 1):
 
     # ===== Validation (streaming, O(1) memory) =====
     model.eval()
-    confmat = torch.zeros((num_classes, num_classes), dtype=torch.int64)
+    confmat = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=device)
     correct, total = 0, 0
 
     with torch.inference_mode():
@@ -541,22 +606,23 @@ for epoch in range(1, epochs + 1):
 
             valid = (yb != ignore_index) & (yb >= 0) & (yb < num_classes)
             correct += (pred[valid] == yb[valid]).sum().item()
-            total   += valid.sum().item()
+            total += valid.sum().item()
 
-            confmat = update_confmat(confmat, pred.detach(), yb.detach(), num_classes, ignore_index)
+            confmat = update_confmat_gpu(confmat, pred, yb, num_classes, ignore_index)
 
             del xb, yb, logits, pred
 
-    # derive mIoU and F1 from confmat (CPU)
-    tp = confmat.diag().to(torch.float64)
-    fp = confmat.sum(0).to(torch.float64) - tp
-    fn = confmat.sum(1).to(torch.float64) - tp
+    # derive mIoU and F1 from confmat (CPU for metrics/printing)
+    cm = confmat.detach().cpu()
+    tp = cm.diag().to(torch.float64)
+    fp = cm.sum(0).to(torch.float64) - tp
+    fn = cm.sum(1).to(torch.float64) - tp
     den = tp + fp + fn + 1e-9
     iou_per_class = tp / den
     miou = torch.nanmean(iou_per_class).item()
 
     precision = tp / (tp + fp + 1e-9)
-    recall    = tp / (tp + fn + 1e-9)
+    recall = tp / (tp + fn + 1e-9)
     f1_per_class = (2 * precision * recall) / (precision + recall + 1e-9)
     f1 = torch.nanmean(f1_per_class).item()
 
