@@ -86,21 +86,6 @@ def state_dict_half_cpu(model: torch.nn.Module) -> dict:
             sd[k] = t
     return sd
 
-def _pyify(obj):
-    """Make any structure JSON/YAML-safe: Python scalars, lists, dicts only."""
-    import numpy as _np
-    if isinstance(obj, (str, int, float, bool)) or obj is None:
-        return obj
-    if isinstance(obj, _np.generic):
-        return obj.item()
-    if isinstance(obj, dict):
-        return {str(k): _pyify(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_pyify(v) for v in obj]
-    # fallback: stringify unknown types (Path, Version, enum, etc.)
-    return str(obj)
-
-
 # ===== Argparse / Config =====
 ap = argparse.ArgumentParser()
 ap.add_argument("--config", default="configs/config.yaml")
@@ -137,22 +122,7 @@ test_keys  = list(splits_meta.get("test", []))  # not used here
 patch_size = int(cfg.get("patch_size", 512))
 
 norm_meta  = splits_meta.get("normalization", {})
-clean_meta = _pyify(run_meta)
-
-# Always write JSON (robust)
-with open(os.path.join(outdir, "run_meta.json"), "w") as f:
-    json.dump(clean_meta, f, indent=2)
-
-# Try YAML to TB; if YAML still complains, fall back to JSON text
-try:
-    tb_yaml = yaml.safe_dump(clean_meta, sort_keys=False, default_flow_style=False)
-    writer.add_text("run/config", f"```yaml\n{tb_yaml}\n```", global_step=0)
-except RepresenterError:
-    writer.add_text("run/config",
-                    "```json\n" + json.dumps(clean_meta, indent=2) + "\n```",
-                    global_step=0)
-except Exception as e:
-    print(f"[WARN] TB config text failed: {e}")
+class_meta = splits_meta.get("class_stats", {})
 
 num_classes = int(cfg.get("num_classes", 13))
 ignore_index = int(cfg.get("ignore_val", 255))
@@ -423,29 +393,55 @@ def _git_info():
     return info
 
 _total, _trainable = _count_params(model)
+# ------- helper to make everything YAML/JSON-safe -------
+def _pyify(obj):
+    import numpy as _np
+    import torch as _torch
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if isinstance(obj, _np.generic):
+        return obj.item()
+    if isinstance(obj, _np.ndarray):
+        # keep small arrays readable, otherwise summarize
+        return obj.tolist() if obj.size <= 32 else f"ndarray(shape={obj.shape}, dtype={obj.dtype})"
+    if isinstance(obj, _torch.Tensor):
+        return obj.detach().cpu().tolist() if obj.numel() <= 32 else f"tensor(shape={tuple(obj.shape)}, dtype={obj.dtype})"
+    if isinstance(obj, dict):
+        return {str(k): _pyify(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_pyify(v) for v in obj]
+    # last resort: string
+    return str(obj)
+
+# ------- build metadata dict (coerce versions to str explicitly) -------
 run_meta = {
     "time": datetime.datetime.now().isoformat(timespec="seconds"),
     "device": str(device),
-    "torch": torch.__version__,
-    "cuda": torch.version.cuda if torch.cuda.is_available() else "none",
-    "cudnn_benchmark": torch.backends.cudnn.benchmark,
-    "python": platform.python_version(),
-    "platform": platform.platform(),
-    "git": _git_info(),
-    "data": {"num_classes": num_classes, "channels": expected_C,
-             "patch_size": patch_size, "n_train": len(train_keys), "n_val": len(val_keys)},
+    "torch": str(torch.__version__),                           # <- force str
+    "cuda": str(torch.version.cuda) if torch.version.cuda else "none",
+    "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+    "python": str(platform.python_version()),
+    "platform": str(platform.platform()),
+    "git": _git_info(),  # your helper
+    "data": {
+        "num_classes": int(num_classes),
+        "channels": int(expected_C),
+        "patch_size": int(patch_size),
+        "n_train": int(len(train_keys)),
+        "n_val": int(len(val_keys)),
+    },
     "model": cfg.get("model", {}),
     "training": {
-        "epochs": epochs,
+        "epochs": int(epochs),
         "lr": float(cfg["training"].get("lr", 1e-4)),
         "weight_decay": float(cfg["training"].get("weight_decay", 0.01)),
-        "use_amp": use_amp,
-        "early_stopping_metric": es_metric,
-        "early_stopping_patience": patience,
+        "use_amp": bool(cfg["training"].get("use_amp", False)),
+        "early_stopping_metric": str(es_metric),
+        "early_stopping_patience": int(cfg["training"].get("early_stopping_patience", 30)),
         "grad_clip": float(cfg.get("gradient_clipping", 1.0)),
         "scheduler": {"name": sch_name, "patience": sch_pat, "factor": sch_fac},
-        "batch_size": batch_size,
-        "workers": num_workers,
+        "batch_size": int(batch_size),
+        "workers": int(num_workers),
     },
     "loss": cfg.get("loss", {}),
     "splitting": cfg.get("splitting", {}),
@@ -454,22 +450,33 @@ run_meta = {
         "max": float(class_weights.max().item()),
         "mean": float(class_weights.mean().item()),
     },
-    "model_params": {"total": _total, "trainable": _trainable},
+    "model_params": {"total": int(_total), "trainable": int(_trainable)},
 }
+
+# ------- write & log (YAML → fallback to JSON text) -------
 try:
+    clean_meta = _pyify(run_meta)
+
     with open(os.path.join(outdir, "run_meta.json"), "w") as f:
-        json.dump(run_meta, f, indent=2)
-    writer.add_text("run/config", "```yaml\n" + yaml.safe_dump(run_meta, sort_keys=False) + "\n```", 0)
-    # lightweight hparams
+        json.dump(clean_meta, f, indent=2)
+
+    try:
+        tb_yaml = yaml.safe_dump(clean_meta, sort_keys=False, default_flow_style=False)
+        writer.add_text("run/config", f"```yaml\n{tb_yaml}\n```", global_step=0)
+    except RepresenterError:
+        writer.add_text("run/config", "```json\n" + json.dumps(clean_meta, indent=2) + "\n```", global_step=0)
+
+    # lightweight hparams (must be simple scalars/strings)
     hp = {
         "model.encoder": str(cfg.get("model", {}).get("encoder", "resnet34")),
-        "training.lr": run_meta["training"]["lr"],
-        "training.weight_decay": run_meta["training"]["weight_decay"],
-        "training.scheduler": sch_name,
-        "data.patch_size": patch_size,
-        "data.channels": expected_C,
+        "training.lr": float(run_meta["training"]["lr"]),
+        "training.weight_decay": float(run_meta["training"]["weight_decay"]),
+        "training.scheduler": str(sch_name),
+        "data.patch_size": int(patch_size),
+        "data.channels": int(expected_C),
     }
     writer.add_hparams(hp, {"init/best_loss": 0.0, "init/best_f1": 0.0})
+    writer.flush()
 except Exception as e:
     print(f"[WARN] metadata logging failed: {e}")
 
@@ -507,10 +514,10 @@ for epoch in range(1, epochs + 1):
 
             loss = ft_loss(logits, yb) + ce
 
-        GradScaler(enabled=use_amp).scale(loss).backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
-        GradScaler(enabled=use_amp).step(opt)
-        GradScaler(enabled=use_amp).update()
+            scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
+            scaler.step(opt)
+            scaler.update()
 
         run_loss += float(loss.item())
 
