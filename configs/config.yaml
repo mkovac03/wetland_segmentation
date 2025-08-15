@@ -4,16 +4,19 @@ input_dirs:
   - /media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_23_44
   - /media/lkm413/storage21/gee_embedding_download/images/Europe/2018/bands_45_63
 
+input_dir: "/media/lkm413/storage11/wetland_segmentation/data"  # has subfolders inputs/ and labels/
 processed_dir: data/processed/{now}
 splits_path: data/splits/splits_{now}.json
 output_dir: /home/lkm413/wetland_segmentation/outputs/{now}
+hist_cache_dir: "/media/lkm413/storage11/wetland_segmentation/data/hist_cache"
+
 crs_target: "EPSG:3035"
 
 patch_size: 512
 stride: 512
 batch_size: 16
 num_classes: 13
-input_channels: 63
+input_channels: 64
 band_offset: 0  # Skip label band (index 1), start at band 2 (index 1 in rasterio)
 
 # ===== Label Remapping =====
@@ -107,6 +110,9 @@ splitting:
   max_training_tiles: 6000
   stratify_by_utm: true
   utm_sampling_strategy: "equal"  # or "equal"
+select:
+  water_max_fraction: 0.5
+  water_class: 10
 
 # ===== Sampling =====
 sampling:
@@ -122,3 +128,11 @@ logging:
 # ===== Debugging =====
 debug:
   monitor_memory: true
+
+inference:
+  label_in_first_band: true   # old script didn’t use a label band in the TIFF
+  band_offset: 1
+  drop_indices_after_label: [22, 45]   # drop after removing the label band
+  min_valid_frac: 1.0   # e.g., require at least 1% valid pixels
+
+

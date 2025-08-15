@@ -64,7 +64,7 @@ def compute_histogram(args):
         ignore_val = config["ignore_val"]
         nodata_val = config["nodata_val"]
 
-        hist_dir = os.path.join(processed_dir, "label_histograms")
+        hist_dir = "/media/lkm413/storage11/wetland_segmentation/data/hist_cache"
         os.makedirs(hist_dir, exist_ok=True)
 
         label_path = sorted(tif_list)[0]  # assume label is in band 1 of the first tif
@@ -165,7 +165,7 @@ def process_tile(args):
 
         # Continue processing
         cropped_image = center_crop(filtered_image, target_size=(patch_size, patch_size))
-        cropped_image = np.where(cropped_image == nodata_val, ignore_val, cropped_image).astype(filtered_image.dtype)
+        cropped_image = np.where(cropped_image == nodata_val, 0, cropped_image).astype(filtered_image.dtype)
 
         np.save(os.path.join(processed_dir, f"tile_{tile_key}_lbl.npy"), remapped_label)
         np.save(os.path.join(processed_dir, f"tile_{tile_key}_img.npy"), cropped_image)

@@ -1,68 +1,55 @@
-# File: utils/visualize_predictions.py
+# File: predict/vis_preds_vs_labels.py
+# -*- coding: utf-8 -*-
 import os
 import glob
-import random
-import rasterio
 import numpy as np
 import matplotlib.pyplot as plt
-from datetime import datetime
+import matplotlib.colors as mcolors
 
-# Paths
-INPUT_DIR = "/media/lkm413/storage1/gee_embedding_download/images/Denmark/2018/"
-BASE_PRED_DIR = "/outputs/"
+# ===== Hardcoded paths =====
+PRED_DIR = "/home/lkm413/wetland_segmentation/outputs/20250806_153626/predictions"
+PROCESSED_DIR = "/media/lkm413/storage11/wetland_segmentation/data/processed/20250806_153626"
+MAX_SAMPLES = 10  # how many to display
+NUM_CLASSES = 13  # adjust to your dataset
 
-# Find latest prediction folder
-folders = sorted(glob.glob(os.path.join(BASE_PRED_DIR, "predictions_Denmark2018_*")), key=os.path.getmtime, reverse=True)
-PRED_DIR = folders[0] if folders else None
-if not PRED_DIR:
-    raise RuntimeError("No prediction folders found.")
+# ===== Make discrete colormap =====
+tab20 = plt.cm.get_cmap("tab20", NUM_CLASSES)  # tab20 with NUM_CLASSES discrete colors
+norm = mcolors.BoundaryNorm(boundaries=np.arange(-0.5, NUM_CLASSES + 0.5, 1), ncolors=NUM_CLASSES)
 
-# Timestamp for outputs
-timestamp = os.path.basename(PRED_DIR).split("_")[-1]
-OUTPUT_FILE = f"label_prediction_comparison_{timestamp}.png"
+# ===== Main =====
+pred_files = sorted(glob.glob(os.path.join(PRED_DIR, "*_pred.npy")))
+if not pred_files:
+    raise FileNotFoundError(f"No *_pred.npy files found in {PRED_DIR}")
 
-# Parameters
-NUM_SAMPLES = 10
-NODATA_VALUE = 255
+for idx, pred_path in enumerate(pred_files):
+    if idx >= MAX_SAMPLES:
+        break
 
-# === Utility ===
-def read_first_band(path):
-    with rasterio.open(path) as src:
-        return src.read(1)
+    base_name = os.path.basename(pred_path).replace("_pred.npy", "")
+    lbl_name = base_name + "_lbl.npy"
+    lbl_path = os.path.join(PROCESSED_DIR, lbl_name)
 
-def plot_comparison(gt_img, pred_img, title_gt, title_pred, ax_gt, ax_pred):
-    cmap = "tab20"
-    ax_gt.imshow(np.where(gt_img == NODATA_VALUE, np.nan, gt_img), cmap=cmap, vmin=0, vmax=19)
-    ax_gt.set_title(title_gt)
-    ax_gt.axis('off')
-    ax_pred.imshow(np.where(pred_img == NODATA_VALUE, np.nan, pred_img), cmap=cmap, vmin=0, vmax=19)
-    ax_pred.set_title(title_pred)
-    ax_pred.axis('off')
+    if not os.path.exists(lbl_path):
+        print(f"[WARN] No label found for {base_name}, skipping...")
+        continue
 
-# === Main ===
-def main():
-    input_files = sorted(glob.glob(os.path.join(INPUT_DIR, "*.tif")))
-    pred_files = sorted(glob.glob(os.path.join(PRED_DIR, "*.tif")))
+    pred = np.load(pred_path)
+    lbl = np.load(lbl_path)
 
-    common_files = sorted(set(os.path.basename(f) for f in input_files) & set(os.path.basename(f) for f in pred_files))
-    if len(common_files) == 0:
-        raise RuntimeError("No matching files found between input and prediction directories")
+    if pred.shape != lbl.shape:
+        print(f"[WARN] Shape mismatch for {base_name}: pred {pred.shape}, label {lbl.shape}")
+        continue
 
-    selected_files = random.sample(common_files, min(NUM_SAMPLES, len(common_files)))
+    # Plot
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+    axes[0].imshow(pred, cmap=tab20, norm=norm, interpolation="nearest")
+    axes[0].set_title("Prediction")
+    axes[0].axis("off")
 
-    fig, axes = plt.subplots(NUM_SAMPLES, 2, figsize=(10, 4 * NUM_SAMPLES))
-    if NUM_SAMPLES == 1:
-        axes = np.expand_dims(axes, 0)
+    axes[1].imshow(lbl, cmap=tab20, norm=norm, interpolation="nearest")
+    axes[1].set_title("Label")
+    axes[1].axis("off")
 
-    for i, fname in enumerate(selected_files):
-        gt_img = read_first_band(os.path.join(INPUT_DIR, fname))
-        pred_img = read_first_band(os.path.join(PRED_DIR, fname))
-        plot_comparison(gt_img, pred_img, f"Ground Truth\n{fname}", f"Prediction\n{fname}", axes[i, 0], axes[i, 1])
-
+    plt.suptitle(base_name)
     plt.tight_layout()
-    plt.savefig(OUTPUT_FILE, dpi=300)
-    plt.close()
-    print(f"Saved comparison figure with {NUM_SAMPLES} samples to {OUTPUT_FILE}")
-
-if __name__ == "__main__":
-    main()
+    plt.show()

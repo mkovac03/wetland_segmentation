@@ -5,6 +5,9 @@
       <excludeFolder url="file://$MODULE_DIR$/data/processed" />
       <excludeFolder url="file://$MODULE_DIR$/data/splits" />
       <excludeFolder url="file://$MODULE_DIR$/outputs" />
+      <excludeFolder url="file://$MODULE_DIR$/data/hist_cache" />
+      <excludeFolder url="file://$MODULE_DIR$/data/inputs" />
+      <excludeFolder url="file://$MODULE_DIR$/data/labels" />
     </content>
     <orderEntry type="jdk" jdkName="wetland_segmentation" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
